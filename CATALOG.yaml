@@ -1,8 +1,8 @@
 name: plugin_foundry
-repo: https://github.com/OWNER/REPO
-sha: REPLACE_WITH_40_CHAR_COMMIT_SHA
+repo: https://github.com/julian-saint-work/hermes-plugin-foundry
+sha: 769b3ac5af36af24561856976db954c88a6085cf
 description: Turn a narrow request into a native Hermes plugin with tests, a static scan and a catalog draft.
-maintainer: OWNER
+maintainer: julian-saint-work
 tier: community
 category: automation
 requires_hermes: ">=0.21.5"
