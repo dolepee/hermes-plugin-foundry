@@ -10,3 +10,7 @@ foundry-demo/
 
 CATALOG.yaml
 plugin-catalog-entry.yaml
+
+demo/frames/
+demo/*.mp4
+demo/preview-*.png

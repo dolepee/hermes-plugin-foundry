@@ -7,6 +7,17 @@ This is a spike. It supports two archetypes: a SQLite-backed folder watcher and
 a SQLite-backed JSON API poller, each with one tool. Generated code must be
 reviewed before installing or publishing.
 
+## CLI
+
+For local testing and the demo:
+
+```bash
+python3 foundry_cli.py plan "Watch ~/Invoices for new PDF files"
+python3 foundry_cli.py build "Watch ~/Invoices for new PDF files" --output /tmp/invoices-plugin
+python3 foundry_cli.py test /tmp/invoices-plugin
+python3 foundry_cli.py poll /tmp/github-poller
+```
+
 ## Tools
 
 - `foundry_plan` — parse a request into a spec.
