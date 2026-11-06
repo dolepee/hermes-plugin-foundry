@@ -18,4 +18,5 @@ reviewed before installing or publishing.
 ## Boundary
 
 No auto-merge and no automatic catalog PR. Static scan and generated tests run
-before install; a human still reviews the code.
+before install; a human still reviews the code. The tests run in a subprocess
+with the current Python interpreter; the request cannot supply shell commands.
