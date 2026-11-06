@@ -4,3 +4,6 @@ generated/
 demo-*/
 out/
 data/
+
+.hermes/
+foundry-demo/
