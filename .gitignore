@@ -7,3 +7,6 @@ data/
 
 .hermes/
 foundry-demo/
+
+CATALOG.yaml
+plugin-catalog-entry.yaml
