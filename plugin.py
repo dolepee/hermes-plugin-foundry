@@ -1,6 +1,7 @@
 """Plugin Foundry — Hermes plugin entry points."""
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import threading
@@ -177,20 +178,36 @@ def _consume_approval(tool_name: str, raw_path: str, session_id: str = "",
     return _consume_once(tool_name, raw_path, session_id or "", tool_call_id or "", key[1])
 
 
+_TOOL_CALL_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "foundry_tool_call_id", default="")
+
+
+def _tool_execution_middleware(*, args: dict, next_call, tool_call_id: str = "", **_kwargs):
+    """Bind the host's trusted call id around the real tool dispatch.
+
+    Hermes' public ``tool_execution`` middleware receives the id from its own
+    ``ids.hook_kwargs``, not from model arguments. Resetting the token keeps
+    nested or concurrent dispatches from inheriting an unrelated identity.
+    """
+    token = _TOOL_CALL_ID.set(str(tool_call_id or ""))
+    try:
+        return next_call(args)
+    finally:
+        _TOOL_CALL_ID.reset(token)
+
+
 def _context_call_id(context: dict | None = None) -> str:
     """Return the host's own call id, including when dispatch kwargs omit it.
 
-    Hermes 0.23 resolves pre-tool approvals with a call id but its tool
-    dispatcher does not always forward that kwarg to the native handler. The
-    approval contextvar is set by the host around the call and is therefore
-    trusted host state, unlike anything supplied by a model argument.
+    The public middleware binds the id for the duration of the real dispatch;
+    the host's private approval-context module is deliberately not imported.
+    Missing identity stays empty so ambiguous grants fail closed.
     """
     supplied = str((context or {}).get("tool_call_id") or "")
     if supplied:
         return supplied
     try:
-        from tools.approval_context import _approval_tool_call_id
-        return str(_approval_tool_call_id.get() or "")
+        return str(_TOOL_CALL_ID.get() or "")
     except Exception:
         return ""
 
@@ -362,3 +379,6 @@ def register(ctx):
                           schema=schema, handler=_handler(schema["name"]))
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_approval_response", _on_post_approval_response)
+    register_middleware = getattr(ctx, "register_middleware", None)
+    if register_middleware is not None:
+        register_middleware("tool_execution", _tool_execution_middleware)
