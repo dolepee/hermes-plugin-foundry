@@ -179,6 +179,12 @@ _UNSUPPORTED_TYPE_WORDS = {
     "gif", "mp4", "mp3", "wav", "html", "htm",
 }
 _COMPOSITE_SUFFIX = re.compile(r"\.[a-z0-9]+(?:\.[a-z0-9]+)+")
+_OUTPUT_PURPOSE = re.compile(
+    r"\b(?:and|to|then|with)\s+(?:also\s+)?"
+    r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
+    r"|\b(?:and|with)\s+(?:a|an)?\s*(?:[a-z]+\s+){0,3}"
+    r"(?:summary|report|digest|output)\b"
+)
 
 
 def _extension(request: str) -> str:
@@ -197,6 +203,11 @@ def _extension(request: str) -> str:
     # interpreting the natural-language request.
     text = re.sub(r"(?:^|\s)(?:~|\.{0,2}/)\S+", " ", lower)
     text = re.sub(r"https?://\S+", " ", text)
+    # A later "and produce a text summary" names the output, not a second
+    # watched type. Keep the input declaration that precedes it.
+    output = _OUTPUT_PURPOSE.search(text)
+    if output:
+        text = text[:output.start()]
 
     # The generated watcher filters on Path.suffix, so ".txt.gz" would build a
     # TXT watcher and then ignore every .gz file. Reject composite suffixes.
