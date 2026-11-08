@@ -179,10 +179,12 @@ _UNSUPPORTED_TYPE_WORDS = {
     "gif", "mp4", "mp3", "wav", "html", "htm",
 }
 _COMPOSITE_SUFFIX = re.compile(r"\.[a-z0-9]+(?:\.[a-z0-9]+)+")
-_OUTPUT_PURPOSE = re.compile(
+_OUTPUT_VERB = re.compile(
     r"\b(?:and|to|then|with)\s+(?:also\s+)?"
     r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
-    r"|\b(?:and|with)\s+(?:a|an)?\s*(?:[a-z]+\s+){0,3}"
+)
+_OUTPUT_NOUN = re.compile(
+    r"\b(?:and|with)\s+(?:a|an)?\s*(?:[a-z]+\s+){0,3}"
     r"(?:summary|report|digest|output)\b"
 )
 
@@ -205,8 +207,13 @@ def _extension(request: str) -> str:
     # Do not truncate here: a clause like "and generate a summary of new CSV
     # files" still declares CSV input. This boundary only keeps standalone
     # output descriptors like "text summary" out of the standalone scan.
-    output = _OUTPUT_PURPOSE.search(text)
-    output_start = output.start() if output else len(text)
+    output_verb = _OUTPUT_VERB.search(text)
+    output_noun = _OUTPUT_NOUN.search(text)
+    starts = [match.start() for match in (output_verb, output_noun) if match]
+    output_start = min(starts) if starts else len(text)
+    # Only a verb clause marks a later file noun as an output file. A bare
+    # "and CSV report files" is still an input declaration, not an output.
+    file_output_start = output_verb.start() if output_verb else len(text)
 
     # The generated watcher filters on Path.suffix, so ".txt.gz" would build a
     # TXT watcher and then ignore every .gz file. Reject composite suffixes.
@@ -245,8 +252,20 @@ def _extension(request: str) -> str:
 
     # A type word attached to a later file noun is an input declaration even
     # when it follows an output verb ("... generate a summary of new CSV files").
-    for phrase in re.findall(r"\b([a-z]+(?:\s+[a-z]+){0,4})\s+files?\b", text):
-        for token in phrase.split():
+    # But an output file format ("a text summary file") is not an input.
+    output_nouns = {"summary", "report", "digest", "output"}
+    for match in re.finditer(r"\b([a-z]+(?:\s+[a-z]+){0,4})\s+files?\b", text):
+        phrase = match.group(1)
+        words = phrase.split()
+        if match.start() >= file_output_start and words:
+            last = words[-1]
+            if last in output_nouns:
+                continue
+            if (any(word in output_nouns for word in words)
+                    and last not in _TYPE_ALIASES
+                    and last not in _UNSUPPORTED_TYPE_WORDS):
+                continue
+        for token in words:
             add_token(token)
     # Standalone types before an output-purpose clause are input declarations.
     # After that boundary, only file-noun-attached types count.
