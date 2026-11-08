@@ -25,6 +25,31 @@ class FoundryTests(unittest.TestCase):
         self.assertEqual(spec["extension"], ".pdf")
         self.assertEqual(spec["archetype"], "sqlite_folder_watcher")
 
+    def test_explicit_type_words_map_to_the_requested_extension(self):
+        cases = {
+            "Watch /tmp/invoices for new TXT files": ".txt",
+            "Watch /tmp/invoices for new text files": ".txt",
+            "Watch /tmp/invoices for new CSV files": ".csv",
+            "Watch /tmp/invoices for new Markdown files": ".md",
+            "Watch /tmp/invoices for new JPG files": ".jpg",
+            "Watch /tmp/invoices for new Word files": ".docx",
+            "Watch /tmp/invoices for new .csv files": ".csv",
+        }
+        for request, expected in cases.items():
+            with self.subTest(request=request):
+                self.assertEqual(foundry_core.parse_request(request)["extension"], expected)
+
+    def test_unsupported_ambiguous_or_missing_type_is_rejected(self):
+        for request in (
+            "Watch /tmp/invoices for new XLSX files",
+            "Watch /tmp/invoices for new TXT and CSV files",
+            "Watch /tmp/invoices for new files",
+            "Watch /tmp/invoices",
+        ):
+            with self.subTest(request=request):
+                with self.assertRaises(ValueError):
+                    foundry_core.parse_request(request)
+
     def test_builds_and_tests_a_plugin(self):
         out = self.gen / "invoices"
         result = foundry_core.build_and_test(
@@ -35,12 +60,16 @@ class FoundryTests(unittest.TestCase):
         self.assertTrue((out / "tests" / "test_plugin.py").exists())
 
     def test_generated_watcher_tests_follow_the_selected_extension(self):
-        out = self.gen / "spreadsheets"
-        result = foundry_core.build_and_test(
-            "Watch /tmp/invoices for new .csv files", output_dir=str(out)
-        )
-        self.assertTrue(result["ok"], result)
-        self.assertIn('plugin.EXTENSION', (out / "tests" / "test_plugin.py").read_text())
+        for request, folder, expected in (
+            ("Watch /tmp/invoices for new .csv files", "spreadsheets", ".csv"),
+            ("Watch /tmp/invoices for new TXT files", "text", ".txt"),
+        ):
+            with self.subTest(request=request):
+                out = self.gen / folder
+                result = foundry_core.build_and_test(request, output_dir=str(out))
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["build"]["spec"]["extension"], expected)
+                self.assertIn('plugin.EXTENSION', (out / "tests" / "test_plugin.py").read_text())
 
     def test_default_output_is_under_the_foundry_root(self):
         result = foundry_core.build("Watch /tmp/invoices for new PDF files")

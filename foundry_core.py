@@ -158,16 +158,66 @@ def slugify(value: str) -> str:
     return value or "file-digest"
 
 
+_TYPE_ALIASES = {
+    "pdf": ".pdf",
+    "csv": ".csv",
+    "txt": ".txt",
+    "text": ".txt",
+    "md": ".md",
+    "markdown": ".md",
+    "png": ".png",
+    "image": ".png",
+    "photo": ".png",
+    "jpg": ".jpg",
+    "jpeg": ".jpeg",
+    "docx": ".docx",
+    "word": ".docx",
+}
+_DOTTED_TYPES = "pdf|csv|txt|md|png|jpg|jpeg|docx"
+
+
 def _extension(request: str) -> str:
+    """Return the explicitly requested watcher type, or reject the request.
+
+    A wrong but plausible default is worse than a clear refusal here: a watcher
+    built for PDF will silently ignore a TXT inbox. Only explicit known type
+    words or dotted extensions are accepted; missing, unsupported or conflicting
+    types are errors.
+    """
     lower = request.lower()
-    for candidate in (".pdf", ".csv", ".txt", ".md", ".png", ".jpg", ".jpeg", ".docx"):
-        if candidate in lower:
-            return candidate
-    if "pdf" in lower:
-        return ".pdf"
-    if "image" in lower or "photo" in lower:
-        return ".png"
-    return ".pdf"
+    # Paths often contain type-like words; remove path-shaped tokens before
+    # interpreting the natural-language request.
+    text = re.sub(r"(?:^|\s)(?:~|\.{0,2}/)\S+", " ", lower)
+    text = re.sub(r"https?://\S+", " ", text)
+    phrase = re.search(r"\bfor\s+new\s+(.+?)(?:\s+files?\b|$)", text)
+    target = phrase.group(1) if phrase else text
+
+    found: list[str] = []
+    for dotted in re.findall(rf"(?<![a-z0-9])\.({_DOTTED_TYPES})\b", target):
+        found.append("." + dotted)
+    for token in re.findall(r"[a-z]+", target):
+        singular = token[:-1] if token.endswith("s") and token[:-1] in _TYPE_ALIASES else token
+        if singular in _TYPE_ALIASES:
+            found.append(_TYPE_ALIASES[singular])
+
+    unique = list(dict.fromkeys(found))
+    if len(unique) > 1:
+        raise ValueError(
+            "ambiguous file type: name exactly one of "
+            + ", ".join(sorted(set(_TYPE_ALIASES.values())))
+        )
+    if unique:
+        return unique[0]
+    if phrase:
+        requested = phrase.group(1).strip() or "files"
+        raise ValueError(
+            f"unsupported or ambiguous file type {requested!r}; "
+            "name an explicit type such as TXT, CSV, PDF, Markdown, PNG, JPEG or DOCX"
+        )
+    raise ValueError(
+        "request must name an explicit file type such as TXT, CSV, PDF, "
+        "Markdown, PNG, JPEG or DOCX"
+    )
 
 
 def _interval_minutes(request: str) -> int:
