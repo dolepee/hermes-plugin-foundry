@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -93,20 +94,46 @@ class HostDispatchTests(unittest.TestCase):
         return json.loads(raw) if isinstance(raw, str) else raw
 
     def outside_test_dir(self, name):
+        """An outside tree plus an output directory outside its approved bytes.
+
+        The approval identity covers every byte under the approved tree, so a
+        successful run must not write its marker (or anything else) back into
+        that tree: that would invalidate a concurrently captured identity by
+        design.
+        """
         root = Path(self.tmp.name) / "outside" / name
+        out = Path(self.tmp.name) / "out" / name
         (root / "tests").mkdir(parents=True)
+        out.mkdir(parents=True, exist_ok=True)
         (root / "tests" / "test_marker.py").write_text(
             "import pathlib, unittest\n"
             "class T(unittest.TestCase):\n"
             "    def test_marker(self):\n"
-            f"        pathlib.Path({str(root / 'ran.txt')!r}).write_text('ran')\n",
+            f"        pathlib.Path({str(out / 'ran.txt')!r}).write_text('ran')\n",
             encoding="utf-8",
         )
-        return root
+        return root, out
+
+    def prime_interpreter_artifacts(self, path):
+        """Create the bytecode cache the gated run would create anyway.
+
+        Discovery writes ``tests/__pycache__/*.pyc`` on the first import. The
+        approved identity includes those bytes, so two overlapping approvals
+        must be captured only after the cache exists; otherwise the first run
+        legitimately invalidates the second approval. This primes the cache
+        with the same interpreter and command, outside the approval gate.
+        """
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+            cwd=path, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return self.plugin.core.approval_identity("foundry_test", str(path))
 
     def test_two_overlapping_identical_once_grants_are_both_consumable(self):
         """The host, not this test, supplies each call id to the plugin hook."""
-        path = self.outside_test_dir("same")
+        path, out = self.outside_test_dir("same")
+        approved_identity = self.prime_interpreter_artifacts(path)
         results = {}
 
         def invoke(call_id):
@@ -126,11 +153,47 @@ class HostDispatchTests(unittest.TestCase):
         self.assertEqual(sorted(self.prompt_calls), ["call-A", "call-B"])
         self.assertTrue(results["call-A"].get("ok"), results["call-A"])
         self.assertTrue(results["call-B"].get("ok"), results["call-B"])
-        self.assertTrue((path / "ran.txt").exists())
+        self.assertTrue((out / "ran.txt").exists())
         self.assertEqual(self.plugin._once_grants, {})
+        # Neither run may mutate the approved input bytes.
+        self.assertEqual(
+            self.plugin.core.approval_identity("foundry_test", str(path)),
+            approved_identity,
+        )
+
+    def test_changed_source_after_a_successful_session_run_requests_new_approval(self):
+        """A session grant covers the approved bytes, not the path forever."""
+        path, out = self.outside_test_dir("mutation")
+        self.prime_interpreter_artifacts(path)
+
+        first = self.call(
+            "foundry_test", {"path": str(path)}, "call-S1", choice="session"
+        )
+        self.assertTrue(first.get("ok"), first)
+        self.assertEqual(self.prompt_calls, ["call-S1"])
+
+        # Unchanged bytes reuse the session grant without another prompt.
+        second = self.call("foundry_test", {"path": str(path)}, "call-S2")
+        self.assertTrue(second.get("ok"), second)
+        self.assertEqual(self.prompt_calls, [])
+
+        # Changing the test source must ask again; the new bytes run only
+        # after the new decision.
+        test_file = path / "tests" / "test_marker.py"
+        test_file.write_text(
+            test_file.read_text(encoding="utf-8")
+            + "        pathlib.Path("
+            + repr(str(out / "changed.txt"))
+            + ").write_text('changed')\n",
+            encoding="utf-8",
+        )
+        third = self.call("foundry_test", {"path": str(path)}, "call-S3")
+        self.assertEqual(self.prompt_calls, ["call-S3"])
+        self.assertTrue(third.get("ok"), third)
+        self.assertTrue((out / "changed.txt").exists())
 
     def test_sourceless_bytecode_change_while_the_host_prompt_is_open_is_not_authorised(self):
-        path = self.outside_test_dir("bytecode")
+        path, _out = self.outside_test_dir("bytecode")
         helper = path / "helper.pyc"
         helper.write_bytes(b"approved-bytecode")
 
@@ -148,7 +211,7 @@ class HostDispatchTests(unittest.TestCase):
         self.assertEqual(self.plugin._once_grants, {})
 
     def test_executed_data_file_change_while_the_host_prompt_is_open_is_not_authorised(self):
-        path = self.outside_test_dir("payload")
+        path, _out = self.outside_test_dir("payload")
         payload = path / "tests" / "payload.txt"
         payload.parent.mkdir(parents=True, exist_ok=True)
         payload.write_text("approved-payload", encoding="utf-8")
