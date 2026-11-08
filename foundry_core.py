@@ -186,9 +186,9 @@ _OUTPUT_VERB = re.compile(
 _OUTPUT_NOUN = re.compile(
     r"\b(?:and|with)\s+(?:a|an)?\s*"
     r"(?:(?!(?:files?|and|or|then|of|from)\b)"
-    r"(?:[a-z][a-z0-9]*|\.[a-z][a-z0-9._-]*)"
+    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*)"
     r"(?:\s+(?!(?:files?|and|or|then|of|from)\b)"
-    r"(?:[a-z][a-z0-9]*|\.[a-z][a-z0-9._-]*)){0,3}\s+)?"
+    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*)){0,3}\s+)?"
     r"(?:summary|report|digest|output)\b"
 )
 _INPUT_CLAUSE = re.compile(
@@ -281,11 +281,14 @@ def _extension(request: str) -> str:
     # Dotted candidates are complete suffix tokens, including composite and
     # digit-bearing forms. The same role decision as word candidates applies
     # before validation, so an output format is not treated as input.
-    for match in re.finditer(r"\.[a-z][a-z0-9._-]*", text):
+    for match in re.finditer(r"\.[a-z0-9][a-z0-9._-]*", text):
         if candidate_is_output(match.start(), match.end()):
             continue
-        # A sentence-final period is punctuation, not part of the suffix.
-        suffix = match.group(0).rstrip(".")
+        suffix = match.group(0)
+        # A single sentence-final period is punctuation, not a suffix segment.
+        # Before a file noun, every trailing dot belongs to the token.
+        if suffix.endswith(".") and not re.match(r"\s+files?\b", text[match.end():]):
+            suffix = suffix[:-1]
         if _COMPOSITE_SUFFIX.fullmatch(suffix):
             raise ValueError(
                 "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
