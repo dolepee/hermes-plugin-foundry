@@ -189,7 +189,7 @@ _SENTENCE_INSTRUCTION = re.compile(
     r"notify|alert|tell|message|email|send|ping|inform|remind|"
     r"archive|process|move|copy|upload|delete|monitor|watch|"
     r"then|also"
-    r")\b",
+    r")(?![a-z0-9_-])(?=\s|[.,;:!?]|$)",
     re.IGNORECASE,
 )
 _OUTPUT_VERB = re.compile(
