@@ -292,6 +292,33 @@ class ConfinementTests(FoundryTests):
                     session_id=f"pending-{choice}", tool_call_id=f"call-{choice}-2")
                 self.assertEqual(again["action"], "approve")
 
+    def test_sourceless_bytecode_change_while_approval_is_pending_is_not_authorised(self):
+        path = Path(self._tmp.name) / "outside-bytecode"
+        (path / "tests").mkdir(parents=True)
+        (path / "tests" / "test_marker.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): pass\n",
+            encoding="utf-8",
+        )
+        helper = path / "helper.pyc"
+        for choice in ("once", "session", "always"):
+            with self.subTest(choice=choice):
+                helper.write_bytes(b"approved-bytecode")
+                request = plugin._on_pre_tool_call(
+                    tool_name="foundry_test", args={"path": str(path)},
+                    session_id=f"bytecode-{choice}", tool_call_id=f"call-{choice}")
+                self.assertEqual(request["action"], "approve")
+                helper.write_bytes(b"replacement-bytecode")
+                plugin._on_post_approval_response(
+                    pattern_key="plugin_rule:" + request["rule_key"], choice=choice,
+                    session_id=f"bytecode-{choice}", tool_call_id=f"call-{choice}")
+                with patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
+                    result = json.loads(plugin._handler("foundry_test")(
+                        {"path": str(path)}, session_id=f"bytecode-{choice}",
+                        tool_call_id=f"call-{choice}"))
+                self.assertFalse(result["ok"], result)
+                self.assertTrue(result["needs_approval"], result)
+                run.assert_not_called()
+
     def test_call_b_cannot_consume_call_a_once_grant(self):
         path = str(self._tmp.name)
         request_a = plugin._on_pre_tool_call(

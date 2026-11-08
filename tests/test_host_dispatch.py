@@ -129,6 +129,24 @@ class HostDispatchTests(unittest.TestCase):
         self.assertTrue((path / "ran.txt").exists())
         self.assertEqual(self.plugin._once_grants, {})
 
+    def test_sourceless_bytecode_change_while_the_host_prompt_is_open_is_not_authorised(self):
+        path = self.outside_test_dir("bytecode")
+        helper = path / "helper.pyc"
+        helper.write_bytes(b"approved-bytecode")
+
+        def replace_bytecode():
+            helper.write_bytes(b"replacement-bytecode")
+
+        result = self.call(
+            "foundry_test",
+            {"path": str(path)},
+            "call-PYC",
+            before_answer=replace_bytecode,
+        )
+        self.assertFalse(result.get("ok"), result)
+        self.assertTrue(result.get("needs_approval"), result)
+        self.assertEqual(self.plugin._once_grants, {})
+
     def test_source_change_while_the_host_prompt_is_open_is_not_authorised(self):
         path = Path(self.tmp.name) / "outside" / "catalog"
         path.mkdir(parents=True)
