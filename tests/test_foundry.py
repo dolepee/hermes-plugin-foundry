@@ -38,6 +38,7 @@ class FoundryTests(unittest.TestCase):
             "Watch .csv files in /tmp/invoices for changes": ".csv",
             "Watch /tmp/invoices for new CSV files and produce a text summary": ".csv",
             "Watch /tmp/invoices and generate a summary of new CSV files": ".csv",
+            "Watch /tmp/invoices and generate a summary of CSV invoice files": ".csv",
             "Watch /tmp/invoices for new CSV files and generate a text summary file": ".csv",
             "Watch /tmp/invoices for new CSV files and produce a text summary of the files": ".csv",
         }
@@ -51,6 +52,7 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new TXT and CSV files",
             "Watch /tmp/invoices for new TXT files and CSV files",
             "Watch /tmp/invoices for new TXT files and CSV report files",
+            "Watch /tmp/invoices for new TXT files and generate a summary of CSV report files",
             "Watch /tmp/invoices for new PDF and XLSX files",
             "Watch /tmp/inbox for new PDF and XLS files",
             "Watch /tmp/invoices for new .txt2 files",
