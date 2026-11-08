@@ -114,26 +114,10 @@ class HostDispatchTests(unittest.TestCase):
         )
         return root, out
 
-    def prime_interpreter_artifacts(self, path):
-        """Create the bytecode cache the gated run would create anyway.
-
-        Discovery writes ``tests/__pycache__/*.pyc`` on the first import. The
-        approved identity includes those bytes, so two overlapping approvals
-        must be captured only after the cache exists; otherwise the first run
-        legitimately invalidates the second approval. This primes the cache
-        with the same interpreter and command, outside the approval gate.
-        """
-        proc = subprocess.run(
-            [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-            cwd=path, capture_output=True, text=True, timeout=120,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        return self.plugin.core.approval_identity("foundry_test", str(path))
-
     def test_two_overlapping_identical_once_grants_are_both_consumable(self):
         """The host, not this test, supplies each call id to the plugin hook."""
         path, out = self.outside_test_dir("same")
-        approved_identity = self.prime_interpreter_artifacts(path)
+        approved_identity = self.plugin.core.approval_identity("foundry_test", str(path))
         results = {}
 
         def invoke(call_id):
@@ -164,8 +148,6 @@ class HostDispatchTests(unittest.TestCase):
     def test_changed_source_after_a_successful_session_run_requests_new_approval(self):
         """A session grant covers the approved bytes, not the path forever."""
         path, out = self.outside_test_dir("mutation")
-        self.prime_interpreter_artifacts(path)
-
         first = self.call(
             "foundry_test", {"path": str(path)}, "call-S1", choice="session"
         )
@@ -191,6 +173,34 @@ class HostDispatchTests(unittest.TestCase):
         self.assertEqual(self.prompt_calls, ["call-S3"])
         self.assertTrue(third.get("ok"), third)
         self.assertTrue((out / "changed.txt").exists())
+
+    def test_directory_alias_swap_with_identical_bytes_is_not_authorised(self):
+        path, _out = self.outside_test_dir("alias")
+        first = Path(self.tmp.name) / "alias-first"
+        second = Path(self.tmp.name) / "alias-second"
+        for folder in (first, second):
+            (folder / "tests").mkdir(parents=True)
+            (folder / "tests" / "test_marker.py").write_text(
+                "import unittest\nclass T(unittest.TestCase):\n"
+                "    def test_ok(self): self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        alias = path / "alias"
+        alias.symlink_to(first, target_is_directory=True)
+
+        def replace_alias():
+            alias.unlink()
+            alias.symlink_to(second, target_is_directory=True)
+
+        result = self.call(
+            "foundry_test",
+            {"path": str(path)},
+            "call-ALIAS",
+            before_answer=replace_alias,
+        )
+        self.assertFalse(result.get("ok"), result)
+        self.assertTrue(result.get("needs_approval"), result)
+        self.assertEqual(self.plugin._once_grants, {})
 
     def test_sourceless_bytecode_change_while_the_host_prompt_is_open_is_not_authorised(self):
         path, _out = self.outside_test_dir("bytecode")

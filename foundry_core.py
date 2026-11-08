@@ -789,6 +789,7 @@ def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = N
         # code that runs, so pinning only ``*.py`` would let a pending approval
         # be re-used for replacement bytes.
         sources = []
+        directories = []
         pending = [target]
         seen = set()
         while pending:
@@ -806,7 +807,19 @@ def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = N
                 continue
             for entry in entries:
                 if entry.is_dir():
-                    pending.append(entry)
+                    try:
+                        resolved = entry.resolve()
+                    except OSError:
+                        continue
+                    # Record every alias even when its destination has already
+                    # been traversed. The file set alone does not capture which
+                    # path resolution the approved execution will use.
+                    directories.append({
+                        "path": entry.relative_to(target).as_posix(),
+                        "resolved": str(resolved),
+                    })
+                    if resolved not in seen:
+                        pending.append(entry)
                     continue
                 if not entry.is_file():
                     continue
@@ -819,7 +832,10 @@ def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = N
                     })
                 except OSError:
                     continue
-        return {"path": str(target), "sources": sorted(sources, key=lambda row: row["path"])}
+        directories.append({"path": ".", "resolved": str(target.resolve())})
+        return {"path": str(target),
+                "directories": sorted(directories, key=lambda row: row["path"]),
+                "sources": sorted(sources, key=lambda row: row["path"])}
     return {"path": str(target)}
 
 
@@ -867,11 +883,27 @@ def build(request: str, output_dir: str | None = None, install: bool = False,
     return result
 
 
-def _test_env() -> dict[str, str]:
-    """A minimal environment for the generated plugin's test subprocess."""
+def _test_env(scratch: str | Path | None = None) -> dict[str, str]:
+    """A minimal environment for the generated plugin's test subprocess.
+
+    Interpreter caches and ordinary temporary output go to a fresh directory
+    outside the approved input tree. Existing bytecode/data under the tree is
+    still hashed by ``approval_identity``; only newly generated artifacts are
+    redirected so a normal run does not invalidate an untouched approval.
+    """
     env = {key: os.environ[key] for key in TEST_ENV_ALLOWLIST if key in os.environ}
     env.setdefault("HOME", str(Path.home()))
     env["PYTHONIOENCODING"] = "utf-8"
+    if scratch is not None:
+        scratch = Path(scratch)
+        cache = scratch / "pycache"
+        temp = scratch / "tmp"
+        cache.mkdir(parents=True, exist_ok=True)
+        temp.mkdir(parents=True, exist_ok=True)
+        env["PYTHONPYCACHEPREFIX"] = str(cache)
+        env["TMPDIR"] = str(temp)
+        env["TEMP"] = str(temp)
+        env["TMP"] = str(temp)
     return env
 
 
@@ -887,11 +919,13 @@ def run_tests(plugin_dir: str | Path, timeout: int = 90,
                 "stderr": f"not a directory: {target}"}
     if not allow_outside_root:
         _check_tree_confined(target, generated_root(hermes_home, root))
+    import tempfile
     try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
-            cwd=target, env=_test_env(), capture_output=True, text=True, timeout=timeout,
-        )
+        with tempfile.TemporaryDirectory(prefix="foundry-test-") as scratch:
+            proc = subprocess.run(
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+                cwd=target, env=_test_env(scratch), capture_output=True, text=True, timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         return {"ok": False, "returncode": None, "stdout": "",
                 "stderr": f"tests timed out after {timeout}s"}

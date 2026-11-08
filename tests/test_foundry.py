@@ -1,6 +1,9 @@
+import contextvars
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -132,6 +135,39 @@ class FoundryTests(unittest.TestCase):
         with self.assertRaises(foundry_core.OutsideFoundryRoot):
             foundry_core.read_catalog(self._tmp.name)
 
+
+    def test_run_tests_keeps_interpreter_cache_outside_the_approved_tree(self):
+        path = Path(self._tmp.name) / "outside-cache"
+        (path / "tests").mkdir(parents=True)
+        (path / "tests" / "test_ok.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n"
+            "    def test_ok(self): self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        before = foundry_core.approval_identity("foundry_test", str(path))
+        result = foundry_core.run_tests(path, allow_outside_root=True)
+        self.assertTrue(result["ok"], result)
+        after = foundry_core.approval_identity("foundry_test", str(path))
+        self.assertEqual(before, after)
+        self.assertFalse(any(path.rglob("__pycache__")))
+
+    def test_approval_identity_records_each_directory_alias(self):
+        path = Path(self._tmp.name) / "alias-tree"
+        shared = Path(self._tmp.name) / "shared-tree"
+        (path / "tests").mkdir(parents=True)
+        (shared / "tests").mkdir(parents=True)
+        (shared / "tests" / "test_marker.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n"
+            "    def test_ok(self): self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        (path / "first").symlink_to(shared, target_is_directory=True)
+        (path / "second").symlink_to(shared, target_is_directory=True)
+        identity = foundry_core.approval_identity("foundry_test", str(path))
+        dirs = {row["path"]: row["resolved"] for row in identity["directories"]}
+        self.assertEqual(dirs["first"], str(shared.resolve()))
+        self.assertEqual(dirs["second"], str(shared.resolve()))
+        self.assertIn(".", dirs)
 
 class ConfinementTests(FoundryTests):
     def test_test_sources_symlinked_outside_need_approval(self):
@@ -461,6 +497,11 @@ class PluginToolTests(unittest.TestCase):
         self._env = patch.dict(os.environ, {"HERMES_PLUGIN_FOUNDRY_ROOT": str(self.root)})
         self._env.start()
         self.addCleanup(self._env.stop)
+        with plugin._approvals_lock:
+            plugin._requests.clear()
+            plugin._once_grants.clear()
+            plugin._session_grants.clear()
+            plugin._permanent_grants.clear()
         self.tools = {schema["name"]: schema for schema in plugin.TOOL_SCHEMAS}
 
     def test_build_tool_exposes_no_install_flag(self):
@@ -582,6 +623,79 @@ class PluginToolTests(unittest.TestCase):
         self.assertTrue(callable(hooks[0][1]))
         self.assertTrue(callable(hooks[1][1]))
 
+
+    def test_handler_uses_host_context_call_id_when_dispatch_omits_it(self):
+        path = str(self._tmp.name)
+        requests = []
+        for call_id in ("call-A", "call-B"):
+            requests.append(plugin._on_pre_tool_call(
+                tool_name="foundry_test", args={"path": path},
+                session_id="host-context", tool_call_id=call_id))
+        for request, call_id in zip(requests, ("call-A", "call-B")):
+            plugin._on_post_approval_response(
+                pattern_key="plugin_rule:" + request["rule_key"], choice="once",
+                session_id="host-context", tool_call_id=call_id)
+        fake_context = types.SimpleNamespace(
+            _approval_tool_call_id=contextvars.ContextVar("test_approval_tool_call_id", default=""))
+        with unittest.mock.patch.dict(sys.modules, {"tools.approval_context": fake_context}):
+            with unittest.mock.patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
+                for call_id in ("call-A", "call-B"):
+                    token = fake_context._approval_tool_call_id.set(call_id)
+                    try:
+                        result = json.loads(plugin._handler("foundry_test")(
+                            {"path": path}, session_id="host-context"))
+                    finally:
+                        fake_context._approval_tool_call_id.reset(token)
+                    self.assertTrue(result["ok"], result)
+                self.assertEqual(run.call_count, 2)
+        self.assertEqual(plugin._once_grants, {})
+
+    def test_handler_without_a_call_id_stays_fail_closed_when_two_grants_match(self):
+        path = str(self._tmp.name)
+        requests = []
+        for call_id in ("call-A", "call-B"):
+            requests.append(plugin._on_pre_tool_call(
+                tool_name="foundry_test", args={"path": path},
+                session_id="ambiguous", tool_call_id=call_id))
+        for request, call_id in zip(requests, ("call-A", "call-B")):
+            plugin._on_post_approval_response(
+                pattern_key="plugin_rule:" + request["rule_key"], choice="once",
+                session_id="ambiguous", tool_call_id=call_id)
+        with unittest.mock.patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
+            result = json.loads(plugin._handler("foundry_test")(
+                {"path": path}, session_id="ambiguous"))
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(result["needs_approval"], result)
+        run.assert_not_called()
+
+    def test_directory_alias_swap_with_identical_bytes_is_not_authorised(self):
+        path = Path(self._tmp.name) / "alias-approval"
+        first = Path(self._tmp.name) / "alias-first"
+        second = Path(self._tmp.name) / "alias-second"
+        for folder in (first, second):
+            (folder / "tests").mkdir(parents=True)
+            (folder / "tests" / "test_marker.py").write_text(
+                "import unittest\nclass T(unittest.TestCase):\n"
+                "    def test_ok(self): self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        path.mkdir()
+        (path / "alias").symlink_to(first, target_is_directory=True)
+        request = plugin._on_pre_tool_call(
+            tool_name="foundry_test", args={"path": str(path)},
+            session_id="alias-swap", tool_call_id="alias-swap-call")
+        self.assertEqual(request["action"], "approve")
+        (path / "alias").unlink()
+        (path / "alias").symlink_to(second, target_is_directory=True)
+        plugin._on_post_approval_response(
+            pattern_key="plugin_rule:" + request["rule_key"], choice="once",
+            session_id="alias-swap", tool_call_id="alias-swap-call")
+        with unittest.mock.patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
+            result = json.loads(plugin._handler("foundry_test")(
+                {"path": str(path)}, session_id="alias-swap", tool_call_id="alias-swap-call"))
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(result["needs_approval"], result)
+        run.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

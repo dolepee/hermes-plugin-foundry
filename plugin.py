@@ -177,6 +177,24 @@ def _consume_approval(tool_name: str, raw_path: str, session_id: str = "",
     return _consume_once(tool_name, raw_path, session_id or "", tool_call_id or "", key[1])
 
 
+def _context_call_id(context: dict | None = None) -> str:
+    """Return the host's own call id, including when dispatch kwargs omit it.
+
+    Hermes 0.23 resolves pre-tool approvals with a call id but its tool
+    dispatcher does not always forward that kwarg to the native handler. The
+    approval contextvar is set by the host around the call and is therefore
+    trusted host state, unlike anything supplied by a model argument.
+    """
+    supplied = str((context or {}).get("tool_call_id") or "")
+    if supplied:
+        return supplied
+    try:
+        from tools.approval_context import _approval_tool_call_id
+        return str(_approval_tool_call_id.get() or "")
+    except Exception:
+        return ""
+
+
 def _outside_root_reason(tool_name: str, raw_path: str) -> str | None:
     try:
         core.check_tool_path(tool_name, raw_path)
@@ -213,6 +231,7 @@ def _on_pre_tool_call(tool_name: str = "", args=None, *, session_id: str = "",
     if reason is None:
         return None
     scope = session_id or task_id or ""
+    tool_call_id = _context_call_id({"tool_call_id": tool_call_id})
     if _scope_grant(tool_name, raw, scope):
         return None
     key = _approval_key(tool_name, raw)
@@ -301,7 +320,7 @@ def _handler(name: str):
     def call(args=None, **_context):
         payload = args if isinstance(args, dict) else {}
         session_id = str(_context.get('session_id') or _context.get('task_id') or '')
-        tool_call_id = str(_context.get('tool_call_id') or '')
+        tool_call_id = _context_call_id(_context)
         try:
             if name == "foundry_plan":
                 return _json(core.parse_request(str(payload.get("request", ""))))
