@@ -2,7 +2,7 @@ name: plugin_foundry
 label: Plugin Foundry
 kind: standalone
 manifest_version: 1
-version: 0.1.3
+version: 0.1.4
 description: >
   Turn a narrow plugin request into a native Hermes plugin with a manifest,
   entry point, tool, SQLite state and tests. Writes only under the Foundry data

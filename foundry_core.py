@@ -158,16 +158,194 @@ def slugify(value: str) -> str:
     return value or "file-digest"
 
 
+_TYPE_ALIASES = {
+    "pdf": ".pdf",
+    "csv": ".csv",
+    "txt": ".txt",
+    "text": ".txt",
+    "md": ".md",
+    "markdown": ".md",
+    "png": ".png",
+    "image": ".png",
+    "photo": ".png",
+    "jpg": ".jpg",
+    "jpeg": ".jpeg",
+    "docx": ".docx",
+    "word": ".docx",
+}
+_DOTTED_TYPES = "pdf|csv|txt|md|png|jpg|jpeg|docx"
+_UNSUPPORTED_TYPE_WORDS = {
+    "xlsx", "xls", "doc", "ppt", "pptx", "json", "xml", "zip", "gz", "tar",
+    "gif", "mp4", "mp3", "wav", "html", "htm",
+}
+_COMPOSITE_SUFFIX = re.compile(r"\.[a-z0-9]+(?:\.[a-z0-9]+)+")
+_SUFFIX_ATOM = "\ue000"  # opaque, position-preserving stand-in for a suffix token
+# Bounded, intentional sentence archetypes. A period after a suffix is
+# punctuation only when what follows is the end of the request or one of these
+# supported instruction clauses. Other prose fails closed instead of being
+# treated as a file declaration.
+_SENTENCE_INSTRUCTION = re.compile(
+    r"\s+(?:please\s+)?(?:"
+    r"notify|alert|tell|message|email|send|ping|inform|remind|"
+    r"archive|process|move|copy|upload|delete|monitor|watch|"
+    r"then|also"
+    r")(?![a-z0-9_-])(?=\s|[.,;:!?]|$)",
+    re.IGNORECASE,
+)
+_OUTPUT_VERB = re.compile(
+    r"\b(?:and|to|then|with)\s+(?:also\s+)?"
+    r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
+)
+_OUTPUT_NOUN = re.compile(
+    r"\b(?:and|with)\s+(?:a|an)?\s*"
+    r"(?:(?!(?:files?|and|or|then|of|from)\b)"
+    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*|\ue000)"
+    r"(?:\s+(?!(?:files?|and|or|then|of|from)\b)"
+    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*|\ue000)){0,3}\s+)?"
+    r"(?:summary|report|digest|output)\b"
+)
+_INPUT_CLAUSE = re.compile(
+    r"\b(?:and|then|also|but|,\s*then)\s+(?:then\s+)?"
+    r"(?:watch|monitor|scan|look\s+in|poll)\b"
+)
+
+
 def _extension(request: str) -> str:
-    lower = request.lower()
-    for candidate in (".pdf", ".csv", ".txt", ".md", ".png", ".jpg", ".jpeg", ".docx"):
-        if candidate in lower:
-            return candidate
-    if "pdf" in lower:
-        return ".pdf"
-    if "image" in lower or "photo" in lower:
-        return ".png"
-    return ".pdf"
+    """Return the explicitly requested watcher type, or reject the request.
+
+    A wrong but plausible default is worse than a clear refusal here: a watcher
+    built for PDF will silently ignore a TXT inbox. Type words that qualify a
+    file noun ("CSV report files") stay input even after an output-purpose
+    clause, while a standalone output descriptor ("and a text report",
+    "text summary") does not add a watched type. An explicit new input clause
+    ("then watch ...") reopens the watched role. Only explicit known type
+    words or single dotted suffixes are accepted; missing, unsupported,
+    composite or conflicting types are errors.
+
+    Sentence punctuation is intentionally bounded: a period after a suffix is
+    removed only at the end of the request or before a supported follow-up
+    instruction (notify, archive, process, send, and similar). Any other prose
+    keeps the period in the suffix and fails closed, so callers should write
+    "watch for CSV files, then notify me" instead of relying on arbitrary
+    sentence parsing.
+    """
+    # Keep character positions aligned with the original request so sentence
+    # casing is still available when deciding whether a final period is
+    # punctuation. Path-shaped tokens are blanked, not shortened.
+    original = re.sub(
+        r"(?:^|\s)(?:~|\.{0,2}/)\S+",
+        lambda match: " " * len(match.group(0)),
+        request,
+    )
+    original = re.sub(
+        r"https?://\S+", lambda match: " " * len(match.group(0)), original
+    )
+    text = original.lower()
+    # Tokenize complete dotted suffixes before any word or clause scan. Their
+    # interiors are masked so a hyphen/underscore segment or an "of/from"
+    # inside a filename can never create a spurious marker.
+    suffix_matches = list(re.finditer(r"\.[a-z0-9][a-z0-9._-]*", text))
+    masked = list(text)
+    for match in suffix_matches:
+        # Keep one opaque atom at the outer token position so neighboring
+        # words cannot become adjacent (e.g. "and .csv output files" must not
+        # look like the output verb "and output"); mask only the interior.
+        masked[match.start()] = _SUFFIX_ATOM
+        for index in range(match.start() + 1, match.end()):
+            masked[index] = " "
+    scan = "".join(masked)
+
+    verb_starts = [match.start() for match in _OUTPUT_VERB.finditer(scan)]
+    input_starts = [match.start() for match in _INPUT_CLAUSE.finditer(scan)]
+    relation_starts = [match.start() for match in re.finditer(r"\b(?:of|from)\b", scan)]
+    noun_starts: list[int] = []
+    for match in _OUTPUT_NOUN.finditer(scan):
+        tail = scan[match.end():]
+        # "CSV report files" and "CSV summary invoice files" qualify watched
+        # files (plural) and stay input. "text summary file" and
+        # "a .txt report" are standalone output descriptors. Do not let the
+        # qualifier guard cross an of/from relation or a clause conjunction.
+        qualifier = re.match(r"\s+(?:[a-z.]+(?:\s+[a-z.]+){0,2}\s+)?files\b", tail)
+        if qualifier and not re.search(r"\b(?:of|from|and|or|then)\b", qualifier.group(0)):
+            continue
+        noun_starts.append(match.start())
+
+    markers: list[tuple[int, str]] = []
+    markers.extend((value, "verb") for value in verb_starts)
+    markers.extend((value, "input") for value in input_starts)
+    markers.extend((value, "relation") for value in relation_starts)
+    markers.extend((value, "noun") for value in noun_starts)
+
+    def candidate_is_output(start: int, end: int) -> bool:
+        """One role decision for a word or dotted-suffix candidate."""
+        prior = [item for item in markers if item[0] <= start]
+        if not prior:
+            return False
+        boundary, kind = max(prior, key=lambda item: item[0])
+        if kind in {"input", "relation"}:
+            return False
+        if kind == "noun":
+            return True
+        prefix = scan[boundary:start]
+        return not re.search(r"\b(?:of|from)\b", prefix)
+
+    found: list[str] = []
+
+    def add_token(token: str) -> None:
+        if token in _TYPE_ALIASES:
+            found.append(_TYPE_ALIASES[token])
+        elif token in _UNSUPPORTED_TYPE_WORDS:
+            raise ValueError(
+                f"unsupported file type {token!r}; name one of TXT, CSV, PDF, "
+                "Markdown, PNG, JPEG or DOCX"
+            )
+        elif token.endswith("s") and token[:-1] in _TYPE_ALIASES:
+            found.append(_TYPE_ALIASES[token[:-1]])
+        elif token.endswith("s") and token[:-1] in _UNSUPPORTED_TYPE_WORDS:
+            raise ValueError(
+                f"unsupported file type {token!r}; name one of TXT, CSV, PDF, "
+                "Markdown, PNG, JPEG or DOCX"
+            )
+
+    for match in suffix_matches:
+        if candidate_is_output(match.start(), match.end()):
+            continue
+        suffix = match.group(0)
+        # A final period is punctuation only at the end of the request or
+        # before one of the supported instruction clauses. A continuing noun
+        # phrase of any length or hyphenation keeps the period in the token.
+        if suffix.endswith("."):
+            after = original[match.end():]
+            if not after.strip() or _SENTENCE_INSTRUCTION.match(after):
+                suffix = suffix[:-1]
+        if _COMPOSITE_SUFFIX.fullmatch(suffix):
+            raise ValueError(
+                "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
+            )
+        if suffix not in set(_TYPE_ALIASES.values()):
+            raise ValueError(
+                f"unsupported file suffix {suffix!r}; name one of .TXT, .CSV, "
+                ".PDF, .MD, .PNG, .JPG, .JPEG or .DOCX"
+            )
+        found.append(suffix)
+
+    for match in re.finditer(r"(?<![.a-z0-9])[a-z]+(?![.a-z0-9])", scan):
+        if candidate_is_output(match.start(), match.end()):
+            continue
+        add_token(match.group(0))
+
+    unique = list(dict.fromkeys(found))
+    if len(unique) > 1:
+        raise ValueError(
+            "ambiguous file type: name exactly one of "
+            + ", ".join(sorted(set(_TYPE_ALIASES.values())))
+        )
+    if unique:
+        return unique[0]
+    raise ValueError(
+        "request must name an explicit file type such as TXT, CSV, PDF, "
+        "Markdown, PNG, JPEG or DOCX"
+    )
 
 
 def _interval_minutes(request: str) -> int:

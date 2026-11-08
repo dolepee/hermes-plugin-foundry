@@ -25,6 +25,130 @@ class FoundryTests(unittest.TestCase):
         self.assertEqual(spec["extension"], ".pdf")
         self.assertEqual(spec["archetype"], "sqlite_folder_watcher")
 
+    def test_explicit_type_words_map_to_the_requested_extension(self):
+        cases = {
+            "Watch /tmp/invoices for new TXT files": ".txt",
+            "Watch /tmp/invoices for new text files": ".txt",
+            "Watch /tmp/invoices for new CSV files": ".csv",
+            "Watch /tmp/invoices for new Markdown files": ".md",
+            "Watch /tmp/invoices for new JPG files": ".jpg",
+            "Watch /tmp/invoices for new Word files": ".docx",
+            "Watch /tmp/invoices for new .csv files": ".csv",
+            "Watch /tmp/invoices for new invoice files (.csv)": ".csv",
+            "Watch .csv files in /tmp/invoices for changes": ".csv",
+            "Watch /tmp/invoices for new CSV files and produce a text summary": ".csv",
+            "Watch /tmp/invoices and generate a summary of new CSV files": ".csv",
+            "Watch /tmp/invoices and generate a summary of CSV invoice files": ".csv",
+            "Watch /tmp/invoices and generate a text summary of CSV invoice files": ".csv",
+            "Watch /tmp/invoices for new .csv files and generate a .txt summary file": ".csv",
+            "Watch /tmp/invoices for new CSV files and generate a .xlsx summary file": ".csv",
+            "Watch /tmp/invoices and generate a .txt summary of CSV files": ".csv",
+            "Watch /tmp/invoices and generate a summary of CSV files and write a text report": ".csv",
+            "Watch /tmp/invoices for new .csv files and generate a .txt file": ".csv",
+            "Watch /tmp/invoices for new CSV files and generate a TXT file": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .txt report": ".csv",
+            "Watch /tmp/invoices for new TXT files and .csv output report": ".txt",
+            "Watch /tmp/invoices for new TXT files and a .csv output report": ".txt",
+            "Watch /tmp/invoices for new TXT files and .csv summary": ".txt",
+            "Watch /tmp/invoices for new TXT files and a .csv report": ".txt",
+            "Watch /tmp/invoices and generate a summary of .csv files and a text report": ".csv",
+            "Watch /tmp/invoices for new CSV files and a text summary of the files": ".csv",
+            "Watch /tmp/invoices for new CSV files and a text summary of CSV report files": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .mp3 report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .txt.gz report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .mp3.gz report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .txt-backup report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .txt--backup report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .txt__backup report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .7z.txt report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .7z report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .7z-from-txt report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .7z-from-xlsx report": ".csv",
+            "Watch /tmp/invoices for new .csv, then stop.": ".csv",
+            "Watch /tmp/invoices for new .csv. Notify me when files arrive.": ".csv",
+            "Watch /tmp/invoices for new .csv. Notify when files arrive.": ".csv",
+            "Watch /tmp/invoices for new .csv. Archive files after processing.": ".csv",
+            "Watch /tmp/invoices for new .csv. Alert me when files arrive.": ".csv",
+            "Watch /tmp/invoices for new .csv.": ".csv",
+            "Watch /tmp/invoices for new CSV files and generate a text summary file": ".csv",
+            "Watch /tmp/invoices for new CSV files and produce a text summary of the files": ".csv",
+            "Watch /tmp/invoices for new .csv files and a text report": ".csv",
+            "Watch /tmp/invoices for new CSV files and a summary": ".csv",
+            "Watch /tmp/invoices for new .csv files and a digest": ".csv",
+            "Watch /tmp/invoices for new TXT files and a text report": ".txt",
+        }
+        for request, expected in cases.items():
+            with self.subTest(request=request):
+                self.assertEqual(foundry_core.parse_request(request)["extension"], expected)
+
+    def test_unsupported_ambiguous_or_missing_type_is_rejected(self):
+        for request in (
+            "Watch /tmp/invoices for new XLSX files",
+            "Watch /tmp/invoices for new TXT and CSV files",
+            "Watch /tmp/invoices for new TXT files and CSV files",
+            "Watch /tmp/invoices for new TXT files and CSV report files",
+            "Watch /tmp/invoices for new TXT files and CSV summary invoice files",
+            "Watch /tmp/invoices for new TXT files and CSV files and a summary",
+            "Watch /tmp/invoices for new TXT files and XLSX files and a summary",
+            "Watch /tmp/invoices for new TXT files and generate a summary of CSV report files",
+            "Watch /tmp/invoices for new PDF and XLSX files",
+            "Watch /tmp/inbox for new PDF and XLS files",
+            "Watch /tmp/invoices for new .txt2 files",
+            "Watch /tmp/invoices for new TXT and .txt2 files",
+            "Watch /tmp/invoices for new TXT or XLSX files",
+            "Watch /tmp/invoices for new .txt.gz files",
+            "Watch /tmp/invoices for new .mp3.gz files",
+            "Watch /tmp/invoices for new .csv and .csv-backup files",
+            "Watch /tmp/invoices for new .csv and .csv_backup files",
+            "Watch /tmp/invoices for new .csv-backup files",
+            "Watch /tmp/invoices for new .csv--backup files",
+            "Watch /tmp/invoices for new .csv__backup files",
+            "Watch /tmp/invoices for new .csv-.-backup files",
+            "Watch /tmp/invoices for new .csv- files",
+            "Watch /tmp/invoices for new .csv.. files",
+            "Watch /tmp/invoices for new .csv.. Notify me when files arrive.",
+            "Watch /tmp/invoices for new .csv. FILES",
+            "Watch /tmp/invoices for new .csv. FiLeS",
+            "Watch /tmp/invoices for new .csv. Invoice files",
+            "Watch /tmp/invoices for new .csv. INVOICE FILES",
+            "Watch /tmp/invoices for new .csv. summary invoice files",
+            "Watch /tmp/invoices for new .csv. Quarterly invoice report files",
+            "Watch /tmp/invoices for new .csv. Invoice-archive files",
+            "Watch /tmp/invoices for new .csv. Invoice-archive report files",
+            "Watch /tmp/invoices for new .csv. archive-ready invoice files",
+            "Watch /tmp/invoices for new .csv. Archive-ready invoice files",
+            "Watch /tmp/invoices for new .csv. notify_ready files",
+            "Watch /tmp/invoices for new .csv. archive_ready invoice files",
+            "Watch /tmp/invoices for new .csv. notify-archive files",
+            "Watch /tmp/invoices for new .csv... files",
+            "Watch /tmp/invoices for new .csv. files",
+            "Watch /tmp/invoices for new .csv. invoice files",
+            "Watch /tmp/invoices for new TXT files and .csv output files",
+            "Watch /tmp/invoices for new TXT files and .csv summary files",
+            "Watch /tmp/invoices for new TXT files and .csv digest files",
+            "Watch /tmp/invoices for new TXT files and .csv report files",
+            "Watch /tmp/invoices for new .csv files and TXT output files",
+            "Watch /tmp/invoices for new .csv files and TXT summary files",
+            "Watch /tmp/invoices for new .csv files and TXT digest files",
+            "Watch /tmp/invoices for new .csv files and TXT report files",
+            "Watch /tmp/invoices for new .7z files",
+            "Watch /tmp/invoices for new .7z.txt files",
+            "Watch /tmp/invoices for new files",
+            "Watch /tmp/invoices",
+            # A second type qualifying a file noun stays input even when its
+            # descriptor is an output keyword.
+            "Watch /tmp/invoices for new TXT files and CSV summary files",
+            "Watch /tmp/invoices for new TXT files and CSV digest files",
+            "Watch /tmp/invoices for new TXT files and CSV output files",
+            # An explicit later input clause reopens the watched role, so the
+            # second type is a conflict rather than generated output.
+            "Watch /tmp/invoices for new .txt files and generate a summary, then watch .csv files",
+            "Watch /tmp/invoices for new TXT files and generate a summary, then watch .csv files",
+        ):
+            with self.subTest(request=request):
+                with self.assertRaises(ValueError):
+                    foundry_core.parse_request(request)
+
     def test_builds_and_tests_a_plugin(self):
         out = self.gen / "invoices"
         result = foundry_core.build_and_test(
@@ -35,12 +159,16 @@ class FoundryTests(unittest.TestCase):
         self.assertTrue((out / "tests" / "test_plugin.py").exists())
 
     def test_generated_watcher_tests_follow_the_selected_extension(self):
-        out = self.gen / "spreadsheets"
-        result = foundry_core.build_and_test(
-            "Watch /tmp/invoices for new .csv files", output_dir=str(out)
-        )
-        self.assertTrue(result["ok"], result)
-        self.assertIn('plugin.EXTENSION', (out / "tests" / "test_plugin.py").read_text())
+        for request, folder, expected in (
+            ("Watch /tmp/invoices for new .csv files", "spreadsheets", ".csv"),
+            ("Watch /tmp/invoices for new TXT files", "text", ".txt"),
+        ):
+            with self.subTest(request=request):
+                out = self.gen / folder
+                result = foundry_core.build_and_test(request, output_dir=str(out))
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["build"]["spec"]["extension"], expected)
+                self.assertIn('plugin.EXTENSION', (out / "tests" / "test_plugin.py").read_text())
 
     def test_default_output_is_under_the_foundry_root(self):
         result = foundry_core.build("Watch /tmp/invoices for new PDF files")
