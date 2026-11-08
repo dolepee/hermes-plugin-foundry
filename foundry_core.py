@@ -174,6 +174,11 @@ _TYPE_ALIASES = {
     "word": ".docx",
 }
 _DOTTED_TYPES = "pdf|csv|txt|md|png|jpg|jpeg|docx"
+_UNSUPPORTED_TYPE_WORDS = {
+    "xlsx", "xls", "doc", "ppt", "pptx", "json", "xml", "zip", "gz", "tar",
+    "gif", "mp4", "mp3", "wav", "html", "htm",
+}
+_COMPOSITE_SUFFIX = re.compile(r"\.[a-z0-9]+(?:\.[a-z0-9]+)+")
 
 
 def _extension(request: str) -> str:
@@ -181,24 +186,53 @@ def _extension(request: str) -> str:
 
     A wrong but plausible default is worse than a clear refusal here: a watcher
     built for PDF will silently ignore a TXT inbox. Only explicit known type
-    words or dotted extensions are accepted; missing, unsupported or conflicting
-    types are errors.
+    words or single dotted extensions are accepted; missing, unsupported,
+    composite or conflicting types are errors.
     """
     lower = request.lower()
     # Paths often contain type-like words; remove path-shaped tokens before
     # interpreting the natural-language request.
     text = re.sub(r"(?:^|\s)(?:~|\.{0,2}/)\S+", " ", lower)
     text = re.sub(r"https?://\S+", " ", text)
-    phrase = re.search(r"\bfor\s+new\s+(.+?)(?:\s+files?\b|$)", text)
+    phrase = re.search(r"\bfor\s+(?:new\s+)?(.+?)(?:\s+files?\b|$)", text)
     target = phrase.group(1) if phrase else text
 
+    # The generated watcher filters on Path.suffix, so ".txt.gz" would build a
+    # TXT watcher and then ignore every .gz file. Reject composite suffixes.
+    if _COMPOSITE_SUFFIX.search(target):
+        raise ValueError(
+            "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
+        )
+
     found: list[str] = []
-    for dotted in re.findall(rf"(?<![a-z0-9])\.({_DOTTED_TYPES})\b", target):
-        found.append("." + dotted)
-    for token in re.findall(r"[a-z]+", target):
-        singular = token[:-1] if token.endswith("s") and token[:-1] in _TYPE_ALIASES else token
-        if singular in _TYPE_ALIASES:
+    dotted = re.findall(rf"(?<![a-z0-9])\.({_DOTTED_TYPES})\b", target)
+    for extension in dotted:
+        found.append("." + extension)
+
+    if phrase:
+        # In an explicit type phrase every token must be a known type or a
+        # connector. "PDF and XLSX" must not pass as PDF just because PDF is
+        # the first recognised word.
+        for token in re.findall(r"[a-z]+", target):
+            if token in {"and", "or", "plus"}:
+                continue
+            singular = token[:-1] if token.endswith("s") and token[:-1] in _TYPE_ALIASES else token
+            if singular not in _TYPE_ALIASES:
+                raise ValueError(
+                    f"unsupported or ambiguous file type {target.strip()!r}; "
+                    "name one of TXT, CSV, PDF, Markdown, PNG, JPEG or DOCX"
+                )
             found.append(_TYPE_ALIASES[singular])
+    else:
+        for token in re.findall(r"[a-z]+", target):
+            singular = token[:-1] if token.endswith("s") and token[:-1] in _TYPE_ALIASES else token
+            if singular in _TYPE_ALIASES:
+                found.append(_TYPE_ALIASES[singular])
+            elif singular in _UNSUPPORTED_TYPE_WORDS:
+                raise ValueError(
+                    f"unsupported file type {token!r}; name one of TXT, CSV, PDF, "
+                    "Markdown, PNG, JPEG or DOCX"
+                )
 
     unique = list(dict.fromkeys(found))
     if len(unique) > 1:
@@ -209,10 +243,9 @@ def _extension(request: str) -> str:
     if unique:
         return unique[0]
     if phrase:
-        requested = phrase.group(1).strip() or "files"
         raise ValueError(
-            f"unsupported or ambiguous file type {requested!r}; "
-            "name an explicit type such as TXT, CSV, PDF, Markdown, PNG, JPEG or DOCX"
+            f"unsupported or ambiguous file type {target.strip()!r}; "
+            "name one of TXT, CSV, PDF, Markdown, PNG, JPEG or DOCX"
         )
     raise ValueError(
         "request must name an explicit file type such as TXT, CSV, PDF, "

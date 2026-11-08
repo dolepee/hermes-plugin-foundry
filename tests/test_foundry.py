@@ -43,6 +43,9 @@ class FoundryTests(unittest.TestCase):
         for request in (
             "Watch /tmp/invoices for new XLSX files",
             "Watch /tmp/invoices for new TXT and CSV files",
+            "Watch /tmp/invoices for new PDF and XLSX files",
+            "Watch /tmp/invoices for new TXT or XLSX files",
+            "Watch /tmp/invoices for new .txt.gz files",
             "Watch /tmp/invoices for new files",
             "Watch /tmp/invoices",
         ):
