@@ -77,10 +77,17 @@ PATH_ARGS = {
     "foundry_catalog": "path",
 }
 
-# How long an approval request stays usable by the handler it was raised for.
+# How long a pending request stays visible to the matching approval response.
 APPROVAL_TTL_SECONDS = 300.0
 
-_approvals: dict[tuple[str, str], float] = {}
+# A pre_tool_call request is only a pending marker. It never authorizes a
+# handler. The host's post_approval_response hook converts a real human
+# once/session/always decision into a grant bound to this tool, resolved path
+# and session. A denied, timed-out or abandoned request leaves no grant.
+_requests: dict[str, tuple[tuple[str, str], str, float]] = {}
+_once_grants: dict[tuple[str, str, str], float] = {}
+_session_grants: dict[tuple[str, str, str], float] = {}
+_permanent_grants: set[tuple[str, str]] = set()
 _approvals_lock = threading.Lock()
 
 
@@ -92,32 +99,48 @@ def _approval_key(tool_name: str, raw_path: str) -> tuple[str, str] | None:
     return (tool_name, str(resolved))
 
 
-def _note_approval_request(tool_name: str, raw_path: str) -> None:
+def _approval_digest(key: tuple[str, str]) -> str:
+    return hashlib.sha256(("\0".join(key)).encode("utf-8")).hexdigest()[:12]
+
+
+def _note_request(tool_name: str, raw_path: str, session_id: str = "") -> str | None:
     key = _approval_key(tool_name, raw_path)
     if key is None:
-        return
+        return None
+    digest = _approval_digest(key)
     now = time.monotonic()
     with _approvals_lock:
-        for stale in [k for k, seen in _approvals.items() if now - seen > APPROVAL_TTL_SECONDS]:
-            _approvals.pop(stale, None)
-        _approvals[key] = now
+        for stale in [d for d, (_, _, seen) in _requests.items()
+                      if now - seen > APPROVAL_TTL_SECONDS]:
+            _requests.pop(stale, None)
+        _requests[digest] = (key, session_id or "", now)
+    return digest
 
 
-def _consume_approval(tool_name: str, raw_path: str) -> bool:
-    """True only when this hook requested approval for this exact tool and path.
+def _scope_grant(tool_name: str, raw_path: str, session_id: str = "") -> bool:
+    key = _approval_key(tool_name, raw_path)
+    if key is None:
+        return False
+    with _approvals_lock:
+        return key in _permanent_grants or (key[0], key[1], session_id or "") in _session_grants
 
-    The marker is raised before the approval gate and consumed once by the
-    handler. It is not derived from model-supplied arguments, and a denied or
-    failed approval leaves the tool unexecuted, so a stale marker cannot let a
-    call run unapproved.
+
+def _consume_approval(tool_name: str, raw_path: str, session_id: str = "") -> bool:
+    """True only for a real host grant for this exact tool/path/session.
+
+    A pending pre_tool_call marker deliberately does not qualify.
     """
     key = _approval_key(tool_name, raw_path)
     if key is None:
         return False
     now = time.monotonic()
     with _approvals_lock:
-        seen = _approvals.pop(key, None)
-    return seen is not None and now - seen <= APPROVAL_TTL_SECONDS
+        if key in _permanent_grants:
+            return True
+        if _session_grants.get((key[0], key[1], session_id or ""), 0) > now:
+            return True
+        seen = _once_grants.pop((key[0], key[1], session_id or ""), None)
+        return seen is not None and seen > now
 
 
 def _outside_root_reason(tool_name: str, raw_path: str) -> str | None:
@@ -128,9 +151,9 @@ def _outside_root_reason(tool_name: str, raw_path: str) -> str | None:
     return None
 
 
-def _gate(tool_name: str, raw_path: str) -> tuple[bool, bool, str | None]:
+def _gate(tool_name: str, raw_path: str, session_id: str = "") -> tuple[bool, bool, str | None]:
     """Return (may_run, approved, error) for a path-taking tool argument."""
-    if _consume_approval(tool_name, raw_path):
+    if _consume_approval(tool_name, raw_path, session_id):
         return True, True, None
     try:
         core.check_tool_path(tool_name, raw_path)
@@ -139,12 +162,11 @@ def _gate(tool_name: str, raw_path: str) -> tuple[bool, bool, str | None]:
     return True, False, None
 
 
-def _on_pre_tool_call(tool_name: str = "", args=None, **_kwargs):
+def _on_pre_tool_call(tool_name: str = "", args=None, *, session_id: str = "", **_kwargs):
     """Confine path-taking tools to the generated root, escalating anything else.
 
-    Inside-root calls pass through untouched. A path outside the root raises
-    ``{"action": "approve"}`` so a human decides before any code runs or any
-    file is written.
+    A path outside the root raises ``{"action": "approve"}``. This only asks the
+    host for a decision; it does not grant permission.
     """
     if tool_name not in PATH_ARGS:
         return None
@@ -154,8 +176,12 @@ def _on_pre_tool_call(tool_name: str = "", args=None, **_kwargs):
     reason = _outside_root_reason(tool_name, raw)
     if reason is None:
         return None
-    _note_approval_request(tool_name, raw)
-    digest = hashlib.sha256(str(_approval_key(tool_name, raw)).encode("utf-8")).hexdigest()[:12]
+    if _scope_grant(tool_name, raw, session_id):
+        return None
+    key = _approval_key(tool_name, raw)
+    if key is None:
+        return None
+    digest = _note_request(tool_name, raw, session_id)
     return {
         "action": "approve",
         "message": (
@@ -165,6 +191,40 @@ def _on_pre_tool_call(tool_name: str = "", args=None, **_kwargs):
         # Per-path so an "always" decision covers this path, not every future one.
         "rule_key": f"plugin_foundry:{tool_name}:{digest}",
     }
+
+
+def _on_post_approval_response(*, pattern_key: str = "", choice: str = "",
+                               session_id: str = "", session_key: str = "", **_kwargs):
+    """Create a lease only after a real human once/session/always decision."""
+    prefix = "plugin_rule:plugin_foundry:"
+    if not isinstance(pattern_key, str) or not pattern_key.startswith(prefix):
+        return
+    rest = pattern_key[len(prefix):]
+    if ":" not in rest:
+        return
+    tool_name, digest = rest.rsplit(":", 1)
+    with _approvals_lock:
+        request = _requests.get(digest)
+    if request is None:
+        return
+    key, requested_session, seen = request
+    if key[0] != tool_name or time.monotonic() - seen > APPROVAL_TTL_SECONDS:
+        return
+    # The host decision belongs to the session that raised the request; do not
+    # let another session's approval authorize this path.
+    scope = session_id or session_key or requested_session
+    if requested_session and scope and scope != requested_session:
+        return
+    if choice not in {"once", "session", "always"}:
+        return
+    now = time.monotonic()
+    with _approvals_lock:
+        if choice == "always":
+            _permanent_grants.add(key)
+        elif choice == "session":
+            _session_grants[(key[0], key[1], scope or "")] = now + APPROVAL_TTL_SECONDS
+        else:
+            _once_grants[(key[0], key[1], scope or "")] = now + APPROVAL_TTL_SECONDS
 
 
 def _json(value) -> str:
@@ -179,6 +239,7 @@ def _handler(name: str):
     """Hermes tool handler: ``(args: dict, **context) -> JSON string``."""
     def call(args=None, **_context):
         payload = args if isinstance(args, dict) else {}
+        session_id = str(_context.get('session_id') or _context.get('task_id') or '')
         try:
             if name == "foundry_plan":
                 return _json(core.parse_request(str(payload.get("request", ""))))
@@ -186,7 +247,7 @@ def _handler(name: str):
                 output_dir = payload.get("output_dir")
                 approved = False
                 if output_dir:
-                    may_run, approved, error = _gate(name, output_dir)
+                    may_run, approved, error = _gate(name, output_dir, session_id)
                     if not may_run:
                         return _error(error, needs_approval=True)
                 return _json(core.build_and_test(
@@ -194,7 +255,7 @@ def _handler(name: str):
                     allow_outside_root=approved))
             if name == "foundry_test":
                 path = str(payload.get("path", ""))
-                may_run, approved, error = _gate(name, path)
+                may_run, approved, error = _gate(name, path, session_id)
                 if not may_run:
                     return _error(error, needs_approval=True)
                 return _json(core.run_tests(path, allow_outside_root=approved))
@@ -202,7 +263,7 @@ def _handler(name: str):
                 return _json({"plugins": core.list_generated()})
             if name == "foundry_catalog":
                 path = str(payload.get("path", ""))
-                may_run, approved, error = _gate(name, path)
+                may_run, approved, error = _gate(name, path, session_id)
                 if not may_run:
                     return _error(error, needs_approval=True)
                 return _json(core.read_catalog(path, allow_outside_root=approved))
@@ -219,3 +280,4 @@ def register(ctx):
         ctx.register_tool(name=schema["name"], toolset="plugin_foundry",
                           schema=schema, handler=_handler(schema["name"]))
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("post_approval_response", _on_post_approval_response)

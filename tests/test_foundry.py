@@ -126,6 +126,16 @@ class FoundryTests(unittest.TestCase):
 
 
 class PluginToolTests(unittest.TestCase):
+    def approve(self, tool, path, choice="once", session_id="test-session"):
+        request = plugin._on_pre_tool_call(tool_name=tool, args={"path": path}, session_id=session_id)
+        self.assertEqual(request["action"], "approve")
+        plugin._on_post_approval_response(
+            pattern_key="plugin_rule:" + request["rule_key"],
+            choice=choice,
+            session_id=session_id,
+        )
+        return request
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -166,7 +176,7 @@ class PluginToolTests(unittest.TestCase):
 
     def test_handler_runs_outside_path_after_approval(self):
         path = str(self._tmp.name)
-        plugin._on_pre_tool_call(tool_name="foundry_test", args={"path": path})
+        self.approve("foundry_test", path)
         seen = {}
 
         def fake_run(target, **kwargs):
@@ -174,9 +184,49 @@ class PluginToolTests(unittest.TestCase):
             return {"ok": True}
 
         with patch.object(plugin.core, "run_tests", side_effect=fake_run):
-            result = json.loads(plugin._handler("foundry_test")({"path": path}))
+            result = json.loads(plugin._handler("foundry_test")(
+                {"path": path}, session_id="test-session"))
         self.assertTrue(result["ok"])
         self.assertTrue(seen["kwargs"]["allow_outside_root"])
+
+    def test_pending_request_alone_is_not_approval(self):
+        path = str(self._tmp.name)
+        plugin._on_pre_tool_call(tool_name="foundry_test", args={"path": path}, session_id="test-session")
+        with patch.object(plugin.core, "run_tests") as run:
+            result = json.loads(plugin._handler("foundry_test")(
+                {"path": path}, session_id="test-session"))
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["needs_approval"])
+        run.assert_not_called()
+
+    def test_denied_and_abandoned_requests_stay_blocked(self):
+        path = str(self._tmp.name)
+        for choice in ("deny", "timeout", "cancelled"):
+            with self.subTest(choice=choice):
+                request = plugin._on_pre_tool_call(
+                    tool_name="foundry_test", args={"path": path}, session_id="test-session")
+                plugin._on_post_approval_response(
+                    pattern_key="plugin_rule:" + request["rule_key"],
+                    choice=choice,
+                    session_id="test-session",
+                )
+                with patch.object(plugin.core, "run_tests") as run:
+                    result = json.loads(plugin._handler("foundry_test")(
+                        {"path": path}, session_id="test-session"))
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["needs_approval"])
+                run.assert_not_called()
+
+    def test_approval_does_not_cover_a_changed_path(self):
+        path = str(self._tmp.name)
+        self.approve("foundry_test", path)
+        other = str(Path(self._tmp.name) / "other")
+        with patch.object(plugin.core, "run_tests") as run:
+            result = json.loads(plugin._handler("foundry_test")(
+                {"path": other}, session_id="test-session"))
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["needs_approval"])
+        run.assert_not_called()
 
     def test_handler_never_raises(self):
         result = json.loads(plugin._handler("foundry_build")({"request": ""}))
@@ -188,9 +238,9 @@ class PluginToolTests(unittest.TestCase):
         self.assertIsInstance(raw, str)
         self.assertEqual(json.loads(raw)["extension"], ".pdf")
         path = str(self._tmp.name)
-        plugin._on_pre_tool_call(tool_name="foundry_test", args={"path": path})
-        self.assertTrue(plugin._consume_approval("foundry_test", path))
-        self.assertFalse(plugin._consume_approval("foundry_test", path))
+        self.approve("foundry_test", path)
+        self.assertTrue(plugin._consume_approval("foundry_test", path, "test-session"))
+        self.assertFalse(plugin._consume_approval("foundry_test", path, "test-session"))
 
     def test_handler_builds_inside_root_without_approval(self):
         result = json.loads(plugin._handler("foundry_build")({
@@ -211,7 +261,9 @@ class PluginToolTests(unittest.TestCase):
         plugin.register(Ctx())
         self.assertEqual(sorted(tools), sorted(self.tools))
         self.assertEqual(hooks[0][0], "pre_tool_call")
+        self.assertEqual(hooks[1][0], "post_approval_response")
         self.assertTrue(callable(hooks[0][1]))
+        self.assertTrue(callable(hooks[1][1]))
 
 
 if __name__ == "__main__":
