@@ -214,20 +214,26 @@ def _extension(request: str) -> str:
     # interpreting the natural-language request.
     text = re.sub(r"(?:^|\s)(?:~|\.{0,2}/)\S+", " ", lower)
     text = re.sub(r"https?://\S+", " ", text)
-    # Do not truncate here: a clause like "and generate a summary of new CSV
-    # files" still declares CSV input. This boundary only keeps standalone
-    # output descriptors like "text summary" out of the standalone scan.
-    verb_starts = [match.start() for match in _OUTPUT_VERB.finditer(text)]
-    input_starts = [match.start() for match in _INPUT_CLAUSE.finditer(text)]
-    relation_starts = [match.start() for match in re.finditer(r"\b(?:of|from)\b", text)]
+    # Tokenize complete dotted suffixes before any word or clause scan. Their
+    # interiors are masked so a hyphen/underscore segment or an "of/from"
+    # inside a filename can never create a spurious marker.
+    suffix_matches = list(re.finditer(r"\.[a-z0-9][a-z0-9._-]*", text))
+    masked = list(text)
+    for match in suffix_matches:
+        for index in range(match.start(), match.end()):
+            masked[index] = " "
+    scan = "".join(masked)
+
+    verb_starts = [match.start() for match in _OUTPUT_VERB.finditer(scan)]
+    input_starts = [match.start() for match in _INPUT_CLAUSE.finditer(scan)]
+    relation_starts = [match.start() for match in re.finditer(r"\b(?:of|from)\b", scan)]
     noun_starts: list[int] = []
-    for match in _OUTPUT_NOUN.finditer(text):
-        tail = text[match.end():]
+    for match in _OUTPUT_NOUN.finditer(scan):
+        tail = scan[match.end():]
         # "CSV report files" and "CSV summary invoice files" qualify watched
         # files (plural) and stay input. "text summary file" and
         # "a .txt report" are standalone output descriptors. Do not let the
-        # qualifier guard cross an of/from relation or a clause conjunction:
-        # "summary of the files" is output, not a watched-file descriptor.
+        # qualifier guard cross an of/from relation or a clause conjunction.
         qualifier = re.match(r"\s+(?:[a-z.]+(?:\s+[a-z.]+){0,2}\s+)?files\b", tail)
         if qualifier and not re.search(r"\b(?:of|from|and|or|then)\b", qualifier.group(0)):
             continue
@@ -240,13 +246,7 @@ def _extension(request: str) -> str:
     markers.extend((value, "noun") for value in noun_starts)
 
     def candidate_is_output(start: int, end: int) -> bool:
-        """One role decision for a word or dotted-suffix candidate.
-
-        The nearest preceding clause marker defines the candidate's role:
-        output verbs and standalone output nouns open generated-output roles;
-        input verbs and of/from open watched-object roles. The nearest marker
-        wins, so a later standalone output noun resets an earlier relation.
-        """
+        """One role decision for a word or dotted-suffix candidate."""
         prior = [item for item in markers if item[0] <= start]
         if not prior:
             return False
@@ -255,9 +255,7 @@ def _extension(request: str) -> str:
             return False
         if kind == "noun":
             return True
-        # An output verb is output unless its own clause first introduced an
-        # input object ("generate a summary of CSV files").
-        prefix = text[boundary:start]
+        prefix = scan[boundary:start]
         return not re.search(r"\b(?:of|from)\b", prefix)
 
     found: list[str] = []
@@ -278,16 +276,13 @@ def _extension(request: str) -> str:
                 "Markdown, PNG, JPEG or DOCX"
             )
 
-    # Dotted candidates are complete suffix tokens, including composite and
-    # digit-bearing forms. The same role decision as word candidates applies
-    # before validation, so an output format is not treated as input.
-    for match in re.finditer(r"\.[a-z0-9][a-z0-9._-]*", text):
+    for match in suffix_matches:
         if candidate_is_output(match.start(), match.end()):
             continue
         suffix = match.group(0)
-        # A single sentence-final period is punctuation, not a suffix segment.
-        # Before a file noun, every trailing dot belongs to the token.
-        if suffix.endswith(".") and not re.match(r"\s+files?\b", text[match.end():]):
+        # Only a sentence-final full stop is punctuation. A period before a
+        # file noun is part of the requested suffix token.
+        if suffix.endswith(".") and not text[match.end():].strip():
             suffix = suffix[:-1]
         if _COMPOSITE_SUFFIX.fullmatch(suffix):
             raise ValueError(
@@ -300,7 +295,7 @@ def _extension(request: str) -> str:
             )
         found.append(suffix)
 
-    for match in re.finditer(r"(?<![.a-z0-9])[a-z]+(?![.a-z0-9])", text):
+    for match in re.finditer(r"(?<![.a-z0-9])[a-z]+(?![.a-z0-9])", scan):
         if candidate_is_output(match.start(), match.end()):
             continue
         add_token(match.group(0))
