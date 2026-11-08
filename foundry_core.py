@@ -207,31 +207,40 @@ def _extension(request: str) -> str:
     # Do not truncate here: a clause like "and generate a summary of new CSV
     # files" still declares CSV input. This boundary only keeps standalone
     # output descriptors like "text summary" out of the standalone scan.
-    output_verb = _OUTPUT_VERB.search(text)
+    verb_starts = [match.start() for match in _OUTPUT_VERB.finditer(text)]
     output_noun = _OUTPUT_NOUN.search(text)
     noun_start = None
     if output_noun and re.search(r"\b(?:summary|digest|output)\b", output_noun.group(0)):
         noun_start = output_noun.start()
-    starts = [match.start() for match in (output_verb, output_noun) if match]
-    output_start = min(starts) if starts else len(text)
-    boundaries = [value for value in (
-        output_verb.start() if output_verb else None, noun_start) if value is not None]
-    file_output_start = min(boundaries) if boundaries else len(text)
 
     def candidate_is_output(start: int, end: int) -> bool:
-        """One role decision for a word or dotted-suffix candidate."""
-        if start < file_output_start:
+        """One role decision for a word or dotted-suffix candidate.
+
+        The nearest preceding output verb defines the candidate's clause. An
+        input relation only applies inside that clause, so a later "write a
+        text report" is not pulled back into an earlier "summary of".
+        """
+        prior_verbs = [value for value in verb_starts if value <= start]
+        if prior_verbs:
+            boundary = max(prior_verbs)
+        elif noun_start is not None and start >= noun_start:
+            boundary = noun_start
+        else:
             return False
         rest = text[end:]
         file_match = re.search(r"\bfiles?\b", rest)
-        before_file = rest[:file_match.start()] if file_match else rest
-        prefix = text[file_output_start:start]
-        # A qualified object after "summary of"/"from" is input, even if a
-        # descriptive noun follows it ("summary of CSV invoice files").
+        prefix = text[boundary:start]
+        # A qualified object after "summary of"/"from" in this clause is input,
+        # even if a descriptive noun follows it.
         if re.search(r"\b(?:of|from)\b", prefix):
             return False
         if file_match:
-            return bool(re.search(r"\b(?:summary|report|digest|output)\b", before_file))
+            if prior_verbs:
+                # An explicit output verb makes the generated file output even
+                # without a "summary"/"report" adjective.
+                return True
+            return bool(re.search(r"\b(?:summary|report|digest|output)\b",
+                                  rest[:file_match.start()]))
         return True
 
     found: list[str] = []
