@@ -179,6 +179,7 @@ _UNSUPPORTED_TYPE_WORDS = {
     "gif", "mp4", "mp3", "wav", "html", "htm",
 }
 _COMPOSITE_SUFFIX = re.compile(r"\.[a-z0-9]+(?:\.[a-z0-9]+)+")
+_SUFFIX_ATOM = "\ue000"  # opaque, position-preserving stand-in for a suffix token
 _OUTPUT_VERB = re.compile(
     r"\b(?:and|to|then|with)\s+(?:also\s+)?"
     r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
@@ -186,9 +187,9 @@ _OUTPUT_VERB = re.compile(
 _OUTPUT_NOUN = re.compile(
     r"\b(?:and|with)\s+(?:a|an)?\s*"
     r"(?:(?!(?:files?|and|or|then|of|from)\b)"
-    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*)"
+    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*|\ue000)"
     r"(?:\s+(?!(?:files?|and|or|then|of|from)\b)"
-    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*)){0,3}\s+)?"
+    r"(?:[a-z][a-z0-9]*|\.[a-z0-9][a-z0-9._-]*|\ue000)){0,3}\s+)?"
     r"(?:summary|report|digest|output)\b"
 )
 _INPUT_CLAUSE = re.compile(
@@ -220,7 +221,11 @@ def _extension(request: str) -> str:
     suffix_matches = list(re.finditer(r"\.[a-z0-9][a-z0-9._-]*", text))
     masked = list(text)
     for match in suffix_matches:
-        for index in range(match.start(), match.end()):
+        # Keep one opaque atom at the outer token position so neighboring
+        # words cannot become adjacent (e.g. "and .csv output files" must not
+        # look like the output verb "and output"); mask only the interior.
+        masked[match.start()] = _SUFFIX_ATOM
+        for index in range(match.start() + 1, match.end()):
             masked[index] = " "
     scan = "".join(masked)
 
