@@ -184,14 +184,36 @@ _SUFFIX_ATOM = "\ue000"  # opaque, position-preserving stand-in for a suffix tok
 # punctuation only when what follows is the end of the request or one of these
 # supported instruction clauses. Other prose fails closed instead of being
 # treated as a file declaration.
-_SENTENCE_INSTRUCTION = re.compile(
-    r"\s+(?:please\s+)?(?:"
+_INSTRUCTION_VERBS = (
     r"notify|alert|tell|message|email|send|ping|inform|remind|"
     r"archive|process|move|copy|upload|delete|monitor|watch|"
     r"then|also"
-    r")(?![a-z0-9_-])(?=\s|[.,;:!?]|$)",
+)
+# A follow-up sentence must start with a complete instruction verb; a
+# hyphen/underscore prefix ("Archive-ready", "notify_ready") is a declaration.
+_SENTENCE_INSTRUCTION = re.compile(
+    rf"\s+(?:please\s+)?(?:"
+    rf"(?:{_INSTRUCTION_VERBS})\b(?![-_])"
+    rf"|(?:notify|alert|tell|message|email|send|ping|inform|remind)\b"
+    rf"(?=\s+(?:me|us|when|if|on|about|at|once|after|before|with|the|a|an|this|that)\b)"
+    rf"|(?:archive|process|move|copy|upload|delete|monitor|watch)\b"
+    rf"(?=\s+(?:the|this|that|these|those|them|it|all|any|new|old|files?|a|an)\b)"
+    rf")",
     re.IGNORECASE,
 )
+
+
+def _is_instruction_sentence(after: str) -> bool:
+    """Every capitalised follow-up sentence must start with an instruction."""
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+(?=[A-Z])", after.strip())
+        if part.strip()
+    ]
+    return bool(sentences) and all(
+        _SENTENCE_INSTRUCTION.match(" " + sentence) for sentence in sentences
+    )
+
 _OUTPUT_VERB = re.compile(
     r"\b(?:and|to|then|with)\s+(?:also\s+)?"
     r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
@@ -316,7 +338,7 @@ def _extension(request: str) -> str:
         # phrase of any length or hyphenation keeps the period in the token.
         if suffix.endswith("."):
             after = original[match.end():]
-            if not after.strip() or _SENTENCE_INSTRUCTION.match(after):
+            if not after.strip() or _is_instruction_sentence(after):
                 suffix = suffix[:-1]
         if _COMPOSITE_SUFFIX.fullmatch(suffix):
             raise ValueError(
