@@ -185,40 +185,55 @@ def _extension(request: str) -> str:
     """Return the explicitly requested watcher type, or reject the request.
 
     A wrong but plausible default is worse than a clear refusal here: a watcher
-    built for PDF will silently ignore a TXT inbox. The complete type
-    declaration after ``for`` is inspected, so a later ``and CSV files`` cannot
-    be hidden by the first ``files`` token. Only explicit known type words or
-    single dotted extensions are accepted; missing, unsupported, composite or
-    conflicting types are errors.
+    built for PDF will silently ignore a TXT inbox. Scan the whole path-stripped
+    request so a type before a purpose clause (``.csv files ... for changes``)
+    is still seen, and so later ``and CSV files`` cannot hide behind the first
+    ``files`` token. Only explicit known type words or single dotted suffixes
+    are accepted; missing, unsupported, composite or conflicting types are
+    errors.
     """
     lower = request.lower()
     # Paths often contain type-like words; remove path-shaped tokens before
     # interpreting the natural-language request.
     text = re.sub(r"(?:^|\s)(?:~|\.{0,2}/)\S+", " ", lower)
     text = re.sub(r"https?://\S+", " ", text)
-    for_match = re.search(r"\bfor\b", text)
-    segment = text[for_match.end():] if for_match else text
 
     # The generated watcher filters on Path.suffix, so ".txt.gz" would build a
     # TXT watcher and then ignore every .gz file. Reject composite suffixes.
-    if _COMPOSITE_SUFFIX.search(segment):
+    if _COMPOSITE_SUFFIX.search(text):
         raise ValueError(
             "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
         )
+    # Validate every dotted suffix, including digits (".txt2"). The alphabetic
+    # tokenizer below must never reinterpret one as a supported extension.
+    for suffix in re.findall(r"\.[a-z][a-z0-9]*", text):
+        if suffix not in set(_TYPE_ALIASES.values()):
+            raise ValueError(
+                f"unsupported file suffix {suffix!r}; name one of .TXT, .CSV, "
+                ".PDF, .MD, .PNG, .JPG, .JPEG or .DOCX"
+            )
 
     found: list[str] = []
-    for extension in re.findall(rf"(?<![a-z0-9])\.({_DOTTED_TYPES})\b", segment):
+    for extension in re.findall(rf"(?<![a-z0-9])\.({_DOTTED_TYPES})\b", text):
         found.append("." + extension)
-    for token in re.findall(r"[a-z]+", segment):
-        singular = token[:-1] if token.endswith("s") else token
-        if singular in _TYPE_ALIASES:
-            found.append(_TYPE_ALIASES[singular])
-        elif singular in _UNSUPPORTED_TYPE_WORDS:
+    for token in re.findall(r"[a-z]+", text):
+        if token in _TYPE_ALIASES:
+            found.append(_TYPE_ALIASES[token])
+            continue
+        if token in _UNSUPPORTED_TYPE_WORDS:
             raise ValueError(
                 f"unsupported file type {token!r}; name one of TXT, CSV, PDF, "
                 "Markdown, PNG, JPEG or DOCX"
             )
-
+        # Plural normalization only when the singular is itself recognised.
+        # Never turn the explicitly unsupported "xls" into an unknown "xl".
+        if token.endswith("s") and token[:-1] in _TYPE_ALIASES:
+            found.append(_TYPE_ALIASES[token[:-1]])
+        elif token.endswith("s") and token[:-1] in _UNSUPPORTED_TYPE_WORDS:
+            raise ValueError(
+                f"unsupported file type {token!r}; name one of TXT, CSV, PDF, "
+                "Markdown, PNG, JPEG or DOCX"
+            )
     unique = list(dict.fromkeys(found))
     if len(unique) > 1:
         raise ValueError(
