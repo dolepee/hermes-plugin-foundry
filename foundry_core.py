@@ -261,26 +261,29 @@ def _extension(request: str) -> str:
             return True
         return token.endswith("s") and token[:-1] in (_TYPE_ALIASES | _UNSUPPORTED_TYPE_WORDS)
 
-    def relation_object_has_type(words: list[str]) -> bool:
-        for index, word in enumerate(words):
-            if word in input_relations:
-                return any(is_type_token(token) for token in words[index + 1:])
-        return False
-
     for match in re.finditer(r"\b([a-z]+(?:\s+[a-z]+){0,4})\s+files?\b", text):
         phrase = match.group(1)
         words = phrase.split()
         if match.start() >= file_output_start and words:
             last = words[-1]
-            # "summary of CSV invoice files" is still an input declaration:
-            # CSV qualifies the object after "of", even though "invoice" is the
-            # final descriptive noun before "files".
-            if last in output_nouns and not relation_object_has_type(words):
-                continue
-            if (any(word in output_nouns for word in words)
-                    and not is_type_token(last)
-                    and not relation_object_has_type(words)):
-                continue
+            output_noun = next(
+                (index for index, word in enumerate(words) if word in output_nouns), None
+            )
+            relation = next(
+                (index for index, word in enumerate(words) if word in input_relations), None
+            )
+            if output_noun is not None:
+                if relation is not None:
+                    object_words = words[relation + 1:]
+                    # "summary of CSV invoice files": collect the qualified
+                    # object, not the output format words before "of".
+                    if any(is_type_token(token) for token in object_words):
+                        for token in object_words:
+                            add_token(token)
+                        continue
+                # A bare "text summary file" or "summary of the files" is output.
+                if not is_type_token(last):
+                    continue
         for token in words:
             add_token(token)
     # Standalone types before an output-purpose clause are input declarations.

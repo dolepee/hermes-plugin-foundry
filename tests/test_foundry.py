@@ -39,6 +39,7 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new CSV files and produce a text summary": ".csv",
             "Watch /tmp/invoices and generate a summary of new CSV files": ".csv",
             "Watch /tmp/invoices and generate a summary of CSV invoice files": ".csv",
+            "Watch /tmp/invoices and generate a text summary of CSV invoice files": ".csv",
             "Watch /tmp/invoices for new CSV files and generate a text summary file": ".csv",
             "Watch /tmp/invoices for new CSV files and produce a text summary of the files": ".csv",
         }
