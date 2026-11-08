@@ -15,14 +15,102 @@ import re
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 from string import Template
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
-GENERATED = ROOT / "generated"
+FOUNDRY_DATA_DIRNAME = "plugin_foundry"
+FOUNDRY_ROOT_ENV = "HERMES_PLUGIN_FOUNDRY_ROOT"
 DEFAULT_FOLDER = "~/Downloads"
 DEFAULT_INTERVAL = 15
+
+# Only these variables reach a generated plugin's test subprocess. Provider keys
+# and every other Hermes secret stay out of it.
+TEST_ENV_ALLOWLIST = (
+    "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
+    "SYSTEMROOT", "WINDIR", "VIRTUAL_ENV",
+)
+
+
+class OutsideFoundryRoot(ValueError):
+    """A path resolved outside the Foundry data root."""
+
+
+def _hermes_home(hermes_home: str | Path | None = None) -> Path:
+    """Resolve the Hermes home the way the host does (profile-aware)."""
+    if hermes_home:
+        return Path(hermes_home).expanduser()
+    get_hermes_home = None
+    with suppress(Exception):
+        from hermes_constants import get_hermes_home as _get_hermes_home
+        get_hermes_home = _get_hermes_home
+    if get_hermes_home is not None:
+        with suppress(Exception):
+            return Path(get_hermes_home()).expanduser()
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    return Path(env_home).expanduser() if env_home else Path.home() / ".hermes"
+
+
+def foundry_root(hermes_home: str | Path | None = None,
+                 root: str | Path | None = None) -> Path:
+    """The one directory Foundry may write into.
+
+    ``HERMES_PLUGIN_FOUNDRY_ROOT`` is the user-configured override; otherwise
+    it is ``<hermes home>/plugin-data/plugin_foundry/``.
+    """
+    if root is not None:
+        base = Path(root).expanduser()
+    else:
+        override = os.environ.get(FOUNDRY_ROOT_ENV, "").strip()
+        base = (Path(override).expanduser() if override
+                else _hermes_home(hermes_home) / "plugin-data" / FOUNDRY_DATA_DIRNAME)
+    return base.resolve()
+
+
+def generated_root(hermes_home: str | Path | None = None,
+                   root: str | Path | None = None) -> Path:
+    return foundry_root(hermes_home, root) / "generated"
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def resolve_confined(raw_path: str | Path, root: str | Path) -> Path:
+    """Resolve *raw_path* and require it to sit under *root*.
+
+    Symlinks are followed, so a link inside the root that points outside it is
+    rejected too.
+    """
+    root_resolved = Path(root).expanduser().resolve()
+    try:
+        resolved = Path(raw_path).expanduser().resolve()
+    except OSError as exc:
+        raise OutsideFoundryRoot(f"could not resolve path {raw_path!r}: {exc}") from exc
+    if not _is_within(resolved, root_resolved):
+        raise OutsideFoundryRoot(
+            f"{resolved} is outside Foundry's generated root ({root_resolved}); "
+            "set " + FOUNDRY_ROOT_ENV + " to change the root"
+        )
+    return resolved
+
+
+def output_target(output_dir: str | Path | None, root: str | Path) -> Path:
+    """Resolve ``output_dir`` to a directory under *root*.
+
+    A bare name is joined under the root (``--output my-plugin``); anything else
+    must already resolve inside it.
+    """
+    root_resolved = Path(root).expanduser().resolve()
+    if output_dir is None or not str(output_dir).strip():
+        raise ValueError("output_dir is empty")
+    candidate = Path(str(output_dir).strip()).expanduser()
+    if (not candidate.is_absolute() and len(candidate.parts) == 1
+            and candidate.name not in {".", ".."}):
+        candidate = root_resolved / candidate.name
+    return resolve_confined(candidate, root_resolved)
 
 
 def slugify(value: str) -> str:
@@ -601,12 +689,30 @@ def scan_code(plugin_dir: str | Path) -> dict:
     return {"ok": not findings, "findings": findings}
 
 
+def check_tool_path(tool_name: str, raw_path: str, hermes_home: str | None = None,
+                    root: str | None = None) -> Path:
+    """Resolve a path-taking tool's argument exactly as its handler will."""
+    generated = generated_root(hermes_home, root)
+    if tool_name == "foundry_build":
+        return output_target(raw_path, generated)
+    return resolve_confined(raw_path, generated)
+
+
 def build(request: str, output_dir: str | None = None, install: bool = False,
-          hermes_home: str | None = None) -> dict:
+          hermes_home: str | None = None, root: str | None = None,
+          allow_outside_root: bool = False) -> dict:
     spec = parse_request(request)
-    target = Path(output_dir).expanduser() if output_dir else GENERATED / spec["slug"]
+    root_path = foundry_root(hermes_home, root)
+    generated = root_path / "generated"
+    if output_dir and allow_outside_root:
+        target = Path(str(output_dir).strip()).expanduser().resolve()
+    elif output_dir:
+        target = output_target(output_dir, generated)
+    else:
+        target = resolve_confined(generated / spec["slug"], generated)
     if target.exists():
         raise FileExistsError(f"refusing to overwrite existing directory: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.mkdir(parents=True, exist_ok=False)
     for rel, content in _render(spec).items():
         path = target / rel
@@ -622,12 +728,35 @@ def build(request: str, output_dir: str | None = None, install: bool = False,
     return result
 
 
-def run_tests(plugin_dir: str | Path, timeout: int = 90) -> dict:
-    plugin_dir = Path(plugin_dir)
-    proc = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
-        cwd=plugin_dir, capture_output=True, text=True, timeout=timeout,
-    )
+def _test_env() -> dict[str, str]:
+    """A minimal environment for the generated plugin's test subprocess."""
+    env = {key: os.environ[key] for key in TEST_ENV_ALLOWLIST if key in os.environ}
+    env.setdefault("HOME", str(Path.home()))
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def run_tests(plugin_dir: str | Path, timeout: int = 90,
+              hermes_home: str | None = None, root: str | None = None,
+              allow_outside_root: bool = False) -> dict:
+    if allow_outside_root:
+        target = Path(plugin_dir).expanduser().resolve()
+    else:
+        target = resolve_confined(plugin_dir, generated_root(hermes_home, root))
+    if not target.is_dir():
+        return {"ok": False, "returncode": None, "stdout": "",
+                "stderr": f"not a directory: {target}"}
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+            cwd=target, env=_test_env(), capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "returncode": None, "stdout": "",
+                "stderr": f"tests timed out after {timeout}s"}
+    except OSError as exc:
+        return {"ok": False, "returncode": None, "stdout": "",
+                "stderr": f"could not start tests: {exc}"}
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
@@ -637,7 +766,7 @@ def run_tests(plugin_dir: str | Path, timeout: int = 90) -> dict:
 
 
 def install_plugin(plugin_dir: str | Path, slug: str, hermes_home: str | None = None) -> str:
-    home = Path(hermes_home).expanduser() if hermes_home else Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    home = _hermes_home(hermes_home)
     target = home / "plugins" / slug
     if target.exists():
         raise FileExistsError(f"plugin already installed: {target}")
@@ -645,20 +774,37 @@ def install_plugin(plugin_dir: str | Path, slug: str, hermes_home: str | None = 
     return str(target)
 
 
-def list_generated() -> list[dict]:
-    if not GENERATED.exists():
+def list_generated(hermes_home: str | None = None, root: str | None = None) -> list[dict]:
+    generated = generated_root(hermes_home, root)
+    if not generated.exists():
         return []
     rows = []
-    for path in sorted(GENERATED.iterdir()):
+    for path in sorted(generated.iterdir()):
         if path.is_dir() and (path / "plugin.yaml").exists():
             rows.append({"name": path.name, "path": str(path)})
     return rows
 
 
-def build_and_test(request: str, output_dir: str | None = None) -> dict:
-    built = build(request, output_dir=output_dir)
+def read_catalog(path: str | Path, hermes_home: str | None = None, root: str | None = None,
+                 allow_outside_root: bool = False) -> dict:
+    if allow_outside_root:
+        plugin_dir = Path(path).expanduser().resolve()
+    else:
+        plugin_dir = resolve_confined(path, generated_root(hermes_home, root))
+    catalog = plugin_dir / "CATALOG.md"
+    if not catalog.exists():
+        return {"ok": False, "error": f"no catalog draft at {catalog}"}
+    return {"ok": True, "path": str(catalog), "content": catalog.read_text(encoding="utf-8")}
+
+
+def build_and_test(request: str, output_dir: str | None = None,
+                   hermes_home: str | None = None, root: str | None = None,
+                   allow_outside_root: bool = False) -> dict:
+    built = build(request, output_dir=output_dir, hermes_home=hermes_home, root=root,
+                  allow_outside_root=allow_outside_root)
     scanned = scan_code(built["spec"]["path"])
-    tested = run_tests(built["spec"]["path"]) if scanned["ok"] else {
+    tested = run_tests(built["spec"]["path"], hermes_home=hermes_home, root=root,
+                       allow_outside_root=allow_outside_root) if scanned["ok"] else {
         "ok": False, "returncode": None, "stdout": "", "stderr": "skipped: static scan failed",
     }
     return {"build": built, "scan": scanned, "tests": tested, "ok": scanned["ok"] and tested["ok"]}

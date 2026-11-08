@@ -41,17 +41,19 @@ The folder watcher stores a fingerprint per file and returns only new or changed
 ## What is real now
 
 - Foundry loads as a Hermes plugin on 0.19.0 and passes the current v0.23.0 validator and doctor with no warnings.
-- `foundry_build` generated `github-poller`.
-- 3/3 generated tests passed.
+- The five tools dispatch through the real registry: `(args, **context) -> JSON string`.
+- `foundry_build` generated `github-poller` under `<hermes home>/plugin-data/plugin_foundry/generated/`.
+- 3/3 generated tests passed in a subprocess with a minimal environment (no provider keys).
 - Static scan passed with no findings.
-- It installed into the Hermes plugin directory.
+- `foundry_test` refuses directories outside the Foundry root; a `pre_tool_call` hook raises human approval for any path outside it.
+- The CLI installed the generated plugin into the Hermes plugin directory (human step).
 - It loaded as a second real plugin.
 - First live poll found 5 Hermes releases; second poll returned 0 new.
 - Catalog draft generated.
 - Current `hermes plugins validate` passes for both Foundry and the generated plugin.
 - Current `hermes plugins doctor` passes for both.
 - Loaded in a fresh v0.23.0 runtime with `requires_hermes: ">=0.21.5"`; `foundry_plan` returned the expected spec.
-- Evidence: `out/foundry-real-results-v3.json`.
+- Evidence: `out/foundry-real-results-v4.json`.
 
 ## Demo, 60 seconds
 
@@ -74,7 +76,9 @@ The folder watcher stores a fingerprint per file and returns only new or changed
 ## Boundaries
 
 - No arbitrary code generation in the MVP.
-- No auto-install without review.
+- No install from the model-facing tools; install stays a human CLI step.
+- Writes are confined to the Foundry data root; anything else needs explicit human approval.
+- Generated test subprocesses get a minimal environment, never the Hermes provider keys.
 - No auto-merge or automatic catalog submission.
 - Generated code is a starting point, not a security audit.
 

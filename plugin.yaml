@@ -2,11 +2,13 @@ name: plugin_foundry
 label: Plugin Foundry
 kind: standalone
 manifest_version: 1
-version: 0.1.0
+version: 0.1.1
 description: >
   Turn a narrow plugin request into a native Hermes plugin with a manifest,
-  entry point, tool, SQLite state and tests. Generated code is reviewed before
-  install or catalog submission; nothing is auto-merged.
+  entry point, tool, SQLite state and tests. Writes only under the Foundry data
+  root, runs generated tests in a minimal environment, and requires human
+  approval before touching anything outside that root. Installing the result is
+  a separate human step; nothing is auto-merged.
 author: Iyanda Abdulqodir Adedolapo
 license: MIT
 requires_hermes: ">=0.21.5"
@@ -16,3 +18,5 @@ provides_tools:
   - foundry_test
   - foundry_list
   - foundry_catalog
+provides_hooks:
+  - pre_tool_call
