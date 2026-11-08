@@ -292,12 +292,20 @@ def _extension(request: str) -> str:
         if candidate_is_output(match.start(), match.end()):
             continue
         suffix = match.group(0)
-        # A final period is punctuation only at an actual sentence boundary:
-        # end of request, or whitespace followed by a capitalised next
-        # sentence. A period before a lower-case file noun stays in the token.
+        # A final period is punctuation only at an actual sentence boundary.
+        # First rule out a continuing file declaration in any casing
+        # (".csv. FILES", ".csv. Invoice files"), then look for positive
+        # sentence evidence (end of request or a capitalised next sentence).
         if suffix.endswith("."):
             after = original[match.end():]
-            if not after.strip() or re.match(r"\s+[A-Z]", after):
+            continuing_file = re.match(
+                r"\s+(?:(?:[A-Za-z.]+)\s+){0,2}files?\b",
+                after,
+                re.IGNORECASE,
+            )
+            if not continuing_file and (
+                not after.strip() or re.match(r"\s+[A-Z]", after)
+            ):
                 suffix = suffix[:-1]
         if _COMPOSITE_SUFFIX.fullmatch(suffix):
             raise ValueError(
