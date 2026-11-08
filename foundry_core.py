@@ -191,23 +191,22 @@ def _extension(request: str) -> str:
     """Return the explicitly requested watcher type, or reject the request.
 
     A wrong but plausible default is worse than a clear refusal here: a watcher
-    built for PDF will silently ignore a TXT inbox. Scan the whole path-stripped
-    request so a type before a purpose clause (``.csv files ... for changes``)
-    is still seen, and so later ``and CSV files`` cannot hide behind the first
-    ``files`` token. Only explicit known type words or single dotted suffixes
-    are accepted; missing, unsupported, composite or conflicting types are
-    errors.
+    built for PDF will silently ignore a TXT inbox. Type words attached to a
+    later ``files`` noun stay input even after an output-purpose clause, while
+    an output descriptor such as ``text summary`` does not add a watched type.
+    Only explicit known type words or single dotted suffixes are accepted;
+    missing, unsupported, composite or conflicting types are errors.
     """
     lower = request.lower()
     # Paths often contain type-like words; remove path-shaped tokens before
     # interpreting the natural-language request.
     text = re.sub(r"(?:^|\s)(?:~|\.{0,2}/)\S+", " ", lower)
     text = re.sub(r"https?://\S+", " ", text)
-    # A later "and produce a text summary" names the output, not a second
-    # watched type. Keep the input declaration that precedes it.
+    # Do not truncate here: a clause like "and generate a summary of new CSV
+    # files" still declares CSV input. This boundary only keeps standalone
+    # output descriptors like "text summary" out of the standalone scan.
     output = _OUTPUT_PURPOSE.search(text)
-    if output:
-        text = text[:output.start()]
+    output_start = output.start() if output else len(text)
 
     # The generated watcher filters on Path.suffix, so ".txt.gz" would build a
     # TXT watcher and then ignore every .gz file. Reject composite suffixes.
@@ -216,7 +215,7 @@ def _extension(request: str) -> str:
             "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
         )
     # Validate every dotted suffix, including digits (".txt2"). The alphabetic
-    # tokenizer below must never reinterpret one as a supported extension.
+    # tokenizer must never reinterpret one as a supported extension.
     for suffix in re.findall(r"\.[a-z][a-z0-9]*", text):
         if suffix not in set(_TYPE_ALIASES.values()):
             raise ValueError(
@@ -227,24 +226,33 @@ def _extension(request: str) -> str:
     found: list[str] = []
     for extension in re.findall(rf"(?<![a-z0-9])\.({_DOTTED_TYPES})\b", text):
         found.append("." + extension)
-    for token in re.findall(r"[a-z]+", text):
+
+    def add_token(token: str) -> None:
         if token in _TYPE_ALIASES:
             found.append(_TYPE_ALIASES[token])
-            continue
-        if token in _UNSUPPORTED_TYPE_WORDS:
+        elif token in _UNSUPPORTED_TYPE_WORDS:
             raise ValueError(
                 f"unsupported file type {token!r}; name one of TXT, CSV, PDF, "
                 "Markdown, PNG, JPEG or DOCX"
             )
-        # Plural normalization only when the singular is itself recognised.
-        # Never turn the explicitly unsupported "xls" into an unknown "xl".
-        if token.endswith("s") and token[:-1] in _TYPE_ALIASES:
+        elif token.endswith("s") and token[:-1] in _TYPE_ALIASES:
             found.append(_TYPE_ALIASES[token[:-1]])
         elif token.endswith("s") and token[:-1] in _UNSUPPORTED_TYPE_WORDS:
             raise ValueError(
                 f"unsupported file type {token!r}; name one of TXT, CSV, PDF, "
                 "Markdown, PNG, JPEG or DOCX"
             )
+
+    # A type word attached to a later file noun is an input declaration even
+    # when it follows an output verb ("... generate a summary of new CSV files").
+    for phrase in re.findall(r"\b([a-z]+(?:\s+[a-z]+){0,4})\s+files?\b", text):
+        for token in phrase.split():
+            add_token(token)
+    # Standalone types before an output-purpose clause are input declarations.
+    # After that boundary, only file-noun-attached types count.
+    for token in re.findall(r"[a-z]+", text[:output_start]):
+        add_token(token)
+
     unique = list(dict.fromkeys(found))
     if len(unique) > 1:
         raise ValueError(

@@ -37,6 +37,7 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new invoice files (.csv)": ".csv",
             "Watch .csv files in /tmp/invoices for changes": ".csv",
             "Watch /tmp/invoices for new CSV files and produce a text summary": ".csv",
+            "Watch /tmp/invoices and generate a summary of new CSV files": ".csv",
         }
         for request, expected in cases.items():
             with self.subTest(request=request):
@@ -47,6 +48,7 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new XLSX files",
             "Watch /tmp/invoices for new TXT and CSV files",
             "Watch /tmp/invoices for new TXT files and CSV files",
+            "Watch /tmp/invoices for new TXT files and CSV report files",
             "Watch /tmp/invoices for new PDF and XLSX files",
             "Watch /tmp/inbox for new PDF and XLS files",
             "Watch /tmp/invoices for new .txt2 files",
