@@ -783,11 +783,11 @@ def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = N
         return {"path": str(resolved),
                 "sha256": _sha256_file(resolved) if resolved.is_file() else None}
     if tool_name == "foundry_test":
-        # Importable executables are part of the approved identity, not just
-        # source files. A sourceless helper.pyc (or a native extension) can run
-        # code without a .py counterpart, so hashing only ``*.py`` would let a
-        # pending approval be re-used for replacement bytes.
-        import_suffixes = {".py", ".pyc", ".pyo", ".so", ".pyd", ".dll"}
+        # Every regular file under the approved tree is part of the identity,
+        # not just importable sources. A sourceless helper.pyc, a native
+        # extension or a data file a test loads and executes can all change the
+        # code that runs, so pinning only ``*.py`` would let a pending approval
+        # be re-used for replacement bytes.
         sources = []
         pending = [target]
         seen = set()
@@ -808,7 +808,7 @@ def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = N
                 if entry.is_dir():
                     pending.append(entry)
                     continue
-                if entry.suffix.lower() not in import_suffixes:
+                if not entry.is_file():
                     continue
                 try:
                     resolved = entry.resolve()

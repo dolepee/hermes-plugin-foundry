@@ -147,6 +147,25 @@ class HostDispatchTests(unittest.TestCase):
         self.assertTrue(result.get("needs_approval"), result)
         self.assertEqual(self.plugin._once_grants, {})
 
+    def test_executed_data_file_change_while_the_host_prompt_is_open_is_not_authorised(self):
+        path = self.outside_test_dir("payload")
+        payload = path / "tests" / "payload.txt"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text("approved-payload", encoding="utf-8")
+
+        def replace_payload():
+            payload.write_text("replacement-payload", encoding="utf-8")
+
+        result = self.call(
+            "foundry_test",
+            {"path": str(path)},
+            "call-PAYLOAD",
+            before_answer=replace_payload,
+        )
+        self.assertFalse(result.get("ok"), result)
+        self.assertTrue(result.get("needs_approval"), result)
+        self.assertEqual(self.plugin._once_grants, {})
+
     def test_source_change_while_the_host_prompt_is_open_is_not_authorised(self):
         path = Path(self.tmp.name) / "outside" / "catalog"
         path.mkdir(parents=True)
