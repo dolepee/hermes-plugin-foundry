@@ -186,9 +186,9 @@ _OUTPUT_VERB = re.compile(
 _OUTPUT_NOUN = re.compile(
     r"\b(?:and|with)\s+(?:a|an)?\s*"
     r"(?:(?!(?:files?|and|or|then|of|from)\b)"
-    r"(?:[a-z][a-z0-9]*|\.[a-z0-9]+(?:\.[a-z0-9]+)*)"
+    r"(?:[a-z][a-z0-9]*|\.[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*)"
     r"(?:\s+(?!(?:files?|and|or|then|of|from)\b)"
-    r"(?:[a-z][a-z0-9]*|\.[a-z0-9]+(?:\.[a-z0-9]+)*)){0,3}\s+)?"
+    r"(?:[a-z][a-z0-9]*|\.[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*)){0,3}\s+)?"
     r"(?:summary|report|digest|output)\b"
 )
 _INPUT_CLAUSE = re.compile(
@@ -281,7 +281,7 @@ def _extension(request: str) -> str:
     # Dotted candidates are complete suffix tokens, including composite and
     # digit-bearing forms. The same role decision as word candidates applies
     # before validation, so an output format is not treated as input.
-    for match in re.finditer(r"\.[a-z][a-z0-9]*(?:\.[a-z0-9]+)*", text):
+    for match in re.finditer(r"\.[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*", text):
         if candidate_is_output(match.start(), match.end()):
             continue
         suffix = match.group(0)

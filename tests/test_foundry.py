@@ -53,6 +53,7 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new .csv files and a .mp3 report": ".csv",
             "Watch /tmp/invoices for new .csv files and a .txt.gz report": ".csv",
             "Watch /tmp/invoices for new .csv files and a .mp3.gz report": ".csv",
+            "Watch /tmp/invoices for new .csv files and a .txt-backup report": ".csv",
             "Watch /tmp/invoices for new CSV files and generate a text summary file": ".csv",
             "Watch /tmp/invoices for new CSV files and produce a text summary of the files": ".csv",
             "Watch /tmp/invoices for new .csv files and a text report": ".csv",
@@ -81,6 +82,9 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new TXT or XLSX files",
             "Watch /tmp/invoices for new .txt.gz files",
             "Watch /tmp/invoices for new .mp3.gz files",
+            "Watch /tmp/invoices for new .csv and .csv-backup files",
+            "Watch /tmp/invoices for new .csv and .csv_backup files",
+            "Watch /tmp/invoices for new .csv-backup files",
             "Watch /tmp/invoices for new files",
             "Watch /tmp/invoices",
             # A second type qualifying a file noun stays input even when its
