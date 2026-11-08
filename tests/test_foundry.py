@@ -228,6 +228,92 @@ class ConfinementTests(FoundryTests):
         self.assertFalse(result["ok"])
         self.assertTrue(result["needs_approval"])
 
+    def test_nested_in_root_symlink_descendant_outside_needs_approval(self):
+        out = self.gen / "nested-tests"
+        foundry_core.build("Watch /tmp/invoices for new PDF files", output_dir=str(out))
+        shared = self.gen / "shared-tests"
+        shared.mkdir()
+        outside = Path(self._tmp.name) / "outside-helper.py"
+        outside.write_text("VALUE = 'outside'\n")
+        (shared / "helper.py").symlink_to(outside)
+        (out / "tests").rename(out / "tests-real")
+        (out / "tests").symlink_to(shared, target_is_directory=True)
+        with self.assertRaises(foundry_core.OutsideFoundryRoot):
+            foundry_core.run_tests(out)
+        request = plugin._on_pre_tool_call(
+            tool_name="foundry_test", args={"path": str(out)}, session_id="nested-session")
+        self.assertEqual(request["action"], "approve")
+
+    def test_outside_catalog_bytes_change_invalidates_approval(self):
+        out = self.gen / "content-catalog"
+        foundry_core.build("Watch /tmp/invoices for new PDF files", output_dir=str(out))
+        outside = Path(self._tmp.name) / "outside-catalog.md"
+        outside.write_text("# first\n")
+        (out / "CATALOG.md").unlink()
+        (out / "CATALOG.md").symlink_to(outside)
+        request = plugin._on_pre_tool_call(
+            tool_name="foundry_catalog", args={"path": str(out)}, session_id="content-session")
+        plugin._on_post_approval_response(
+            pattern_key="plugin_rule:" + request["rule_key"], choice="once",
+            session_id="content-session", tool_call_id="call-content")
+        outside.write_text("# second\n")
+        result = json.loads(plugin._handler("foundry_catalog")(
+            {"path": str(out)}, session_id="content-session", tool_call_id="call-content"))
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["needs_approval"])
+
+    def test_call_b_cannot_consume_call_a_once_grant(self):
+        path = str(self._tmp.name)
+        request_a = plugin._on_pre_tool_call(
+            tool_name="foundry_test", args={"path": path}, session_id="call-session",
+            tool_call_id="call-A")
+        plugin._on_pre_tool_call(
+            tool_name="foundry_test", args={"path": path}, session_id="call-session",
+            tool_call_id="call-B")
+        plugin._on_post_approval_response(
+            pattern_key="plugin_rule:" + request_a["rule_key"], choice="once",
+            session_id="call-session", tool_call_id="call-A")
+        blocked = json.loads(plugin._handler("foundry_test")(
+            {"path": path}, session_id="call-session", tool_call_id="call-B"))
+        self.assertFalse(blocked["ok"])
+        self.assertTrue(blocked["needs_approval"])
+        with patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
+            allowed = json.loads(plugin._handler("foundry_test")(
+                {"path": path}, session_id="call-session", tool_call_id="call-A"))
+        self.assertTrue(allowed["ok"])
+        run.assert_called_once()
+
+    def test_session_aliases_share_one_once_grant(self):
+        path = str(self._tmp.name)
+        request = plugin._on_pre_tool_call(
+            tool_name="foundry_test", args={"path": path}, session_id="primary",
+            tool_call_id="alias-call")
+        plugin._on_post_approval_response(
+            pattern_key="plugin_rule:" + request["rule_key"], choice="once",
+            session_id="primary", session_key="secondary", tool_call_id="alias-call")
+        with patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
+            first = json.loads(plugin._handler("foundry_test")(
+                {"path": path}, session_id="primary", tool_call_id="alias-call"))
+            second = json.loads(plugin._handler("foundry_test")(
+                {"path": path}, session_id="secondary", tool_call_id="alias-call"))
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertTrue(second["needs_approval"])
+        run.assert_called_once()
+
+    def test_expired_session_grant_requests_renewal(self):
+        path = str(self._tmp.name)
+        request = plugin._on_pre_tool_call(
+            tool_name="foundry_test", args={"path": path}, session_id="expiry-session")
+        plugin._on_post_approval_response(
+            pattern_key="plugin_rule:" + request["rule_key"], choice="session",
+            session_id="expiry-session")
+        future = plugin.time.monotonic() + plugin.APPROVAL_TTL_SECONDS + 5
+        with patch.object(plugin.time, "monotonic", return_value=future):
+            renewed = plugin._on_pre_tool_call(
+                tool_name="foundry_test", args={"path": path}, session_id="expiry-session")
+        self.assertEqual(renewed["action"], "approve")
+
     def test_concurrent_sessions_keep_separate_grants(self):
         path = str(self._tmp.name)
         requests = {}

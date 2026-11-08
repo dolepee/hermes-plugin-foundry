@@ -98,25 +98,43 @@ def resolve_confined(raw_path: str | Path, root: str | Path) -> Path:
 
 
 def _check_tree_confined(target: Path, root: str | Path) -> None:
-    """Reject symlinks and files that resolve outside *root*.
+    """Reject any descendant that resolves outside *root*.
 
-    Checking only the directory argument is insufficient: unittest follows a
-    ``tests`` symlink and imports whatever it points at. Walk without following
-    symlink directories, resolve every entry, and fail if any leaves the root.
+    Directory symlinks are traversed so descendants are checked too; a symlink
+    loop is cut by tracking resolved directories. This is the gate before an
+    unapproved unittest subprocess can follow a test or import symlink.
     """
     root_resolved = Path(root).expanduser().resolve()
-    for current, dirs, files in os.walk(target, followlinks=False):
-        for name in dirs + files:
-            candidate = Path(current) / name
+    if not Path(target).exists():
+        return
+    pending = [Path(target)]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        try:
+            real = current.resolve()
+        except OSError as exc:
+            raise OutsideFoundryRoot(f"could not resolve {current}: {exc}") from exc
+        if real in seen:
+            continue
+        seen.add(real)
+        if not _is_within(real, root_resolved):
+            raise OutsideFoundryRoot(
+                f"{current} resolves outside Foundry's generated root ({root_resolved})")
+        try:
+            entries = list(current.iterdir())
+        except OSError as exc:
+            raise OutsideFoundryRoot(f"could not inspect {current}: {exc}") from exc
+        for entry in entries:
             try:
-                resolved = candidate.resolve()
+                resolved = entry.resolve()
             except OSError as exc:
-                raise OutsideFoundryRoot(f"could not resolve {candidate}: {exc}") from exc
+                raise OutsideFoundryRoot(f"could not resolve {entry}: {exc}") from exc
             if not _is_within(resolved, root_resolved):
                 raise OutsideFoundryRoot(
-                    f"{candidate} resolves outside Foundry's generated root "
-                    f"({root_resolved})"
-                )
+                    f"{entry} resolves outside Foundry's generated root ({root_resolved})")
+            if entry.is_dir():
+                pending.append(entry)
 
 
 def output_target(output_dir: str | Path | None, root: str | Path) -> Path:
@@ -743,9 +761,10 @@ def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = N
                       root: str | None = None) -> dict:
     """The exact object a human approval covers.
 
-    It intentionally does not enforce the root; the caller decides whether an
-    outside target needs approval. It does bind the resolved file/source tree so
-    swapping a symlink or editing a test after approval invalidates the grant.
+    Paths and source bytes are part of the identity. It intentionally does not
+    enforce the root; the caller decides whether an outside target needs
+    approval. Editing an outside test or catalog after approval changes this
+    identity and invalidates the grant.
     """
     generated = generated_root(hermes_home, root)
     if tool_name == "foundry_build":
@@ -761,47 +780,37 @@ def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = N
             resolved = catalog.resolve()
         except OSError:
             resolved = catalog
-        confined = _is_within(resolved, generated)
         return {"path": str(resolved),
-                "sha256": _sha256_file(resolved) if confined and resolved.is_file() else None}
+                "sha256": _sha256_file(resolved) if resolved.is_file() else None}
     if tool_name == "foundry_test":
-        try:
-            _check_tree_confined(target, generated)
-        except OutsideFoundryRoot:
-            # Do not read an outside tree before approval, but bind the resolved
-            # symlink targets so swapping one invalidates the request.
-            outside = []
-            for current, dirs, files in os.walk(target, followlinks=False):
-                for name in dirs + files:
-                    candidate = Path(current) / name
-                    try:
-                        resolved = candidate.resolve()
-                    except OSError:
-                        continue
-                    if not _is_within(resolved, generated):
-                        outside.append(str(resolved))
-            return {"path": str(target), "outside": sorted(set(outside))}
         sources = []
-        seen_dirs = set()
-        for current, dirs, files in os.walk(target, followlinks=True):
+        pending = [target]
+        seen = set()
+        while pending:
+            current = pending.pop()
             try:
-                real_current = Path(current).resolve()
+                real = current.resolve()
             except OSError:
-                dirs[:] = []
                 continue
-            if real_current in seen_dirs:
-                dirs[:] = []
+            if real in seen:
                 continue
-            seen_dirs.add(real_current)
-            for name in sorted(files):
-                path = Path(current) / name
-                if path.suffix.lower() != ".py":
+            seen.add(real)
+            try:
+                entries = list(current.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.is_dir():
+                    pending.append(entry)
+                    continue
+                if entry.suffix.lower() != ".py":
                     continue
                 try:
+                    resolved = entry.resolve()
                     sources.append({
-                        "path": str(path.relative_to(target)),
-                        "resolved": str(path.resolve()),
-                        "sha256": _sha256_file(path),
+                        "path": entry.relative_to(target).as_posix(),
+                        "resolved": str(resolved),
+                        "sha256": _sha256_file(resolved),
                     })
                 except OSError:
                     continue
