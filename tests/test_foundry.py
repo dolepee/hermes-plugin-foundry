@@ -48,6 +48,10 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new CSV files and generate a TXT file": ".csv",
             "Watch /tmp/invoices for new CSV files and generate a text summary file": ".csv",
             "Watch /tmp/invoices for new CSV files and produce a text summary of the files": ".csv",
+            "Watch /tmp/invoices for new .csv files and a text report": ".csv",
+            "Watch /tmp/invoices for new CSV files and a summary": ".csv",
+            "Watch /tmp/invoices for new .csv files and a digest": ".csv",
+            "Watch /tmp/invoices for new TXT files and a text report": ".txt",
         }
         for request, expected in cases.items():
             with self.subTest(request=request):
@@ -68,6 +72,15 @@ class FoundryTests(unittest.TestCase):
             "Watch /tmp/invoices for new .txt.gz files",
             "Watch /tmp/invoices for new files",
             "Watch /tmp/invoices",
+            # A second type qualifying a file noun stays input even when its
+            # descriptor is an output keyword.
+            "Watch /tmp/invoices for new TXT files and CSV summary files",
+            "Watch /tmp/invoices for new TXT files and CSV digest files",
+            "Watch /tmp/invoices for new TXT files and CSV output files",
+            # An explicit later input clause reopens the watched role, so the
+            # second type is a conflict rather than generated output.
+            "Watch /tmp/invoices for new .txt files and generate a summary, then watch .csv files",
+            "Watch /tmp/invoices for new TXT files and generate a summary, then watch .csv files",
         ):
             with self.subTest(request=request):
                 with self.assertRaises(ValueError):

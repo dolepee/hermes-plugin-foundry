@@ -187,17 +187,23 @@ _OUTPUT_NOUN = re.compile(
     r"\b(?:and|with)\s+(?:a|an)?\s*(?:[a-z]+\s+){0,3}"
     r"(?:summary|report|digest|output)\b"
 )
+_INPUT_CLAUSE = re.compile(
+    r"\b(?:and|then|also|but|,\s*then)\s+(?:then\s+)?"
+    r"(?:watch|monitor|scan|look\s+in|poll)\b"
+)
 
 
 def _extension(request: str) -> str:
     """Return the explicitly requested watcher type, or reject the request.
 
     A wrong but plausible default is worse than a clear refusal here: a watcher
-    built for PDF will silently ignore a TXT inbox. Type words attached to a
-    later ``files`` noun stay input even after an output-purpose clause, while
-    an output descriptor such as ``text summary`` does not add a watched type.
-    Only explicit known type words or single dotted suffixes are accepted;
-    missing, unsupported, composite or conflicting types are errors.
+    built for PDF will silently ignore a TXT inbox. Type words that qualify a
+    file noun ("CSV report files") stay input even after an output-purpose
+    clause, while a standalone output descriptor ("and a text report",
+    "text summary") does not add a watched type. An explicit new input clause
+    ("then watch ...") reopens the watched role. Only explicit known type
+    words or single dotted suffixes are accepted; missing, unsupported,
+    composite or conflicting types are errors.
     """
     lower = request.lower()
     # Paths often contain type-like words; remove path-shaped tokens before
@@ -208,25 +214,38 @@ def _extension(request: str) -> str:
     # files" still declares CSV input. This boundary only keeps standalone
     # output descriptors like "text summary" out of the standalone scan.
     verb_starts = [match.start() for match in _OUTPUT_VERB.finditer(text)]
+    input_starts = [match.start() for match in _INPUT_CLAUSE.finditer(text)]
     output_noun = _OUTPUT_NOUN.search(text)
     noun_start = None
-    if output_noun and re.search(r"\b(?:summary|digest|output)\b", output_noun.group(0)):
-        noun_start = output_noun.start()
+    if output_noun:
+        # A descriptor that qualifies a file noun ("CSV report files",
+        # "CSV summary files") describes the watched files and must stay input.
+        # A standalone one ("and a text report", "a summary of ...") opens the
+        # output clause.
+        tail = text[output_noun.end():]
+        if not re.match(r"\s+files?\b", tail):
+            noun_start = output_noun.start()
 
     def candidate_is_output(start: int, end: int) -> bool:
         """One role decision for a word or dotted-suffix candidate.
 
-        The nearest preceding output verb defines the candidate's clause. An
-        input relation only applies inside that clause, so a later "write a
-        text report" is not pulled back into an earlier "summary of".
+        The nearest preceding clause marker defines the candidate's role: an
+        output verb starts a generated-output clause, and an explicit input
+        clause ("then watch", "and monitor") reopens the watched role, so a
+        later request for another input type cannot be read as generated
+        output. An input relation only applies inside its own clause, so a
+        later "write a text report" is not pulled back into a "summary of".
         """
         prior_verbs = [value for value in verb_starts if value <= start]
-        if prior_verbs:
-            boundary = max(prior_verbs)
-        elif noun_start is not None and start >= noun_start:
-            boundary = noun_start
-        else:
+        prior_inputs = [value for value in input_starts if value <= start]
+        boundary = max(prior_verbs) if prior_verbs else None
+        if prior_inputs and (boundary is None or max(prior_inputs) > boundary):
             return False
+        if boundary is None:
+            if noun_start is not None and start >= noun_start:
+                boundary = noun_start
+            else:
+                return False
         rest = text[end:]
         file_match = re.search(r"\bfiles?\b", rest)
         prefix = text[boundary:start]
