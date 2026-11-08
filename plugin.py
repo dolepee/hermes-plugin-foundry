@@ -83,8 +83,9 @@ APPROVAL_TTL_SECONDS = 300.0
 # A pre_tool_call request is only a pending marker. It never authorizes a
 # handler. The host's post_approval_response hook converts a real human
 # once/session/always decision into a grant bound to this tool, resolved path
-# and session. A denied, timed-out or abandoned request leaves no grant.
-_requests: dict[str, tuple[tuple[str, str], str, float]] = {}
+# and the requesting session. A denied, timed-out or abandoned request leaves
+# no grant and removes its pending request.
+_requests: dict[tuple[str, str], tuple[tuple[str, str], str, float]] = {}
 _once_grants: dict[tuple[str, str, str], float] = {}
 _session_grants: dict[tuple[str, str, str], float] = {}
 _permanent_grants: set[tuple[str, str]] = set()
@@ -93,27 +94,29 @@ _approvals_lock = threading.Lock()
 
 def _approval_key(tool_name: str, raw_path: str) -> tuple[str, str] | None:
     try:
-        resolved = Path(raw_path).expanduser().resolve()
+        identity = core.approval_identity(tool_name, raw_path)
     except OSError:
         return None
-    return (tool_name, str(resolved))
+    return (tool_name, json.dumps(identity, sort_keys=True, separators=(",", ":")))
 
 
 def _approval_digest(key: tuple[str, str]) -> str:
     return hashlib.sha256(("\0".join(key)).encode("utf-8")).hexdigest()[:12]
 
 
-def _note_request(tool_name: str, raw_path: str, session_id: str = "") -> str | None:
+def _note_request(tool_name: str, raw_path: str, session_id: str = "",
+                  tool_call_id: str = "") -> str | None:
     key = _approval_key(tool_name, raw_path)
     if key is None:
         return None
     digest = _approval_digest(key)
     now = time.monotonic()
+    scope = session_id or ""
     with _approvals_lock:
-        for stale in [d for d, (_, _, seen) in _requests.items()
+        for stale in [(d, s) for (d, s), (_, _, seen) in _requests.items()
                       if now - seen > APPROVAL_TTL_SECONDS]:
             _requests.pop(stale, None)
-        _requests[digest] = (key, session_id or "", now)
+        _requests[(digest, scope)] = (key, tool_call_id or "", now)
     return digest
 
 
@@ -162,7 +165,8 @@ def _gate(tool_name: str, raw_path: str, session_id: str = "") -> tuple[bool, bo
     return True, False, None
 
 
-def _on_pre_tool_call(tool_name: str = "", args=None, *, session_id: str = "", **_kwargs):
+def _on_pre_tool_call(tool_name: str = "", args=None, *, session_id: str = "",
+                      task_id: str = "", tool_call_id: str = "", **_kwargs):
     """Confine path-taking tools to the generated root, escalating anything else.
 
     A path outside the root raises ``{"action": "approve"}``. This only asks the
@@ -176,12 +180,13 @@ def _on_pre_tool_call(tool_name: str = "", args=None, *, session_id: str = "", *
     reason = _outside_root_reason(tool_name, raw)
     if reason is None:
         return None
-    if _scope_grant(tool_name, raw, session_id):
+    scope = session_id or task_id or ""
+    if _scope_grant(tool_name, raw, scope):
         return None
     key = _approval_key(tool_name, raw)
     if key is None:
         return None
-    digest = _note_request(tool_name, raw, session_id)
+    digest = _note_request(tool_name, raw, scope, tool_call_id)
     return {
         "action": "approve",
         "message": (
@@ -203,28 +208,32 @@ def _on_post_approval_response(*, pattern_key: str = "", choice: str = "",
     if ":" not in rest:
         return
     tool_name, digest = rest.rsplit(":", 1)
+    scope = session_id or session_key or ""
     with _approvals_lock:
-        request = _requests.get(digest)
+        request = _requests.pop((digest, scope), None)
+        if request is None and scope:
+            # A host may report a session key where the hook only had no id.
+            request = _requests.pop((digest, ""), None)
     if request is None:
         return
-    key, requested_session, seen = request
+    key, _tool_call_id, seen = request
     if key[0] != tool_name or time.monotonic() - seen > APPROVAL_TTL_SECONDS:
-        return
-    # The host decision belongs to the session that raised the request; do not
-    # let another session's approval authorize this path.
-    scope = session_id or session_key or requested_session
-    if requested_session and scope and scope != requested_session:
         return
     if choice not in {"once", "session", "always"}:
         return
     now = time.monotonic()
+    scopes = [item for item in (scope, session_id, session_key) if item is not None]
+    if not scopes:
+        scopes = [""]
     with _approvals_lock:
         if choice == "always":
             _permanent_grants.add(key)
         elif choice == "session":
-            _session_grants[(key[0], key[1], scope or "")] = now + APPROVAL_TTL_SECONDS
+            for item in scopes:
+                _session_grants[(key[0], key[1], item)] = now + APPROVAL_TTL_SECONDS
         else:
-            _once_grants[(key[0], key[1], scope or "")] = now + APPROVAL_TTL_SECONDS
+            for item in scopes:
+                _once_grants[(key[0], key[1], item)] = now + APPROVAL_TTL_SECONDS
 
 
 def _json(value) -> str:

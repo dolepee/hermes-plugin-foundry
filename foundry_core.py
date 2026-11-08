@@ -97,6 +97,28 @@ def resolve_confined(raw_path: str | Path, root: str | Path) -> Path:
     return resolved
 
 
+def _check_tree_confined(target: Path, root: str | Path) -> None:
+    """Reject symlinks and files that resolve outside *root*.
+
+    Checking only the directory argument is insufficient: unittest follows a
+    ``tests`` symlink and imports whatever it points at. Walk without following
+    symlink directories, resolve every entry, and fail if any leaves the root.
+    """
+    root_resolved = Path(root).expanduser().resolve()
+    for current, dirs, files in os.walk(target, followlinks=False):
+        for name in dirs + files:
+            candidate = Path(current) / name
+            try:
+                resolved = candidate.resolve()
+            except OSError as exc:
+                raise OutsideFoundryRoot(f"could not resolve {candidate}: {exc}") from exc
+            if not _is_within(resolved, root_resolved):
+                raise OutsideFoundryRoot(
+                    f"{candidate} resolves outside Foundry's generated root "
+                    f"({root_resolved})"
+                )
+
+
 def output_target(output_dir: str | Path | None, root: str | Path) -> Path:
     """Resolve ``output_dir`` to a directory under *root*.
 
@@ -512,8 +534,8 @@ class GeneratedPluginTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plugin.FOLDER = Path(tmp)
             plugin.DB_PATH = Path(tmp) / "state.db"
-            Path(tmp, "a.pdf").write_text("a")
-            Path(tmp, "b.pdf").write_text("b")
+            Path(tmp, "a" + plugin.EXTENSION).write_text("a")
+            Path(tmp, "b" + plugin.EXTENSION).write_text("b")
             first = plugin._scan({})
             self.assertTrue(first["ok"])
             self.assertEqual(first["count"], 2)
@@ -687,7 +709,6 @@ def _render(spec: dict) -> dict[str, str]:
             "SKILL.md": API_SKILL.substitute(spec),
             "tests/test_plugin.py": API_TEST,
             "CATALOG.md": CATALOG.substitute(spec),
-        "CATALOG.yaml": CATALOG_YAML.substitute(spec),
             "CATALOG.yaml": CATALOG_YAML.substitute(spec),
         }
     return {
@@ -713,13 +734,93 @@ def scan_code(plugin_dir: str | Path) -> dict:
     return {"ok": not findings, "findings": findings}
 
 
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def approval_identity(tool_name: str, raw_path: str, hermes_home: str | None = None,
+                      root: str | None = None) -> dict:
+    """The exact object a human approval covers.
+
+    It intentionally does not enforce the root; the caller decides whether an
+    outside target needs approval. It does bind the resolved file/source tree so
+    swapping a symlink or editing a test after approval invalidates the grant.
+    """
+    generated = generated_root(hermes_home, root)
+    if tool_name == "foundry_build":
+        try:
+            target = output_target(raw_path, generated)
+        except OutsideFoundryRoot:
+            target = Path(raw_path).expanduser().resolve()
+        return {"path": str(target)}
+    target = Path(raw_path).expanduser().resolve()
+    if tool_name == "foundry_catalog":
+        catalog = target / "CATALOG.md"
+        try:
+            resolved = catalog.resolve()
+        except OSError:
+            resolved = catalog
+        confined = _is_within(resolved, generated)
+        return {"path": str(resolved),
+                "sha256": _sha256_file(resolved) if confined and resolved.is_file() else None}
+    if tool_name == "foundry_test":
+        try:
+            _check_tree_confined(target, generated)
+        except OutsideFoundryRoot:
+            # Do not read an outside tree before approval, but bind the resolved
+            # symlink targets so swapping one invalidates the request.
+            outside = []
+            for current, dirs, files in os.walk(target, followlinks=False):
+                for name in dirs + files:
+                    candidate = Path(current) / name
+                    try:
+                        resolved = candidate.resolve()
+                    except OSError:
+                        continue
+                    if not _is_within(resolved, generated):
+                        outside.append(str(resolved))
+            return {"path": str(target), "outside": sorted(set(outside))}
+        sources = []
+        seen_dirs = set()
+        for current, dirs, files in os.walk(target, followlinks=True):
+            try:
+                real_current = Path(current).resolve()
+            except OSError:
+                dirs[:] = []
+                continue
+            if real_current in seen_dirs:
+                dirs[:] = []
+                continue
+            seen_dirs.add(real_current)
+            for name in sorted(files):
+                path = Path(current) / name
+                if path.suffix.lower() != ".py":
+                    continue
+                try:
+                    sources.append({
+                        "path": str(path.relative_to(target)),
+                        "resolved": str(path.resolve()),
+                        "sha256": _sha256_file(path),
+                    })
+                except OSError:
+                    continue
+        return {"path": str(target), "sources": sorted(sources, key=lambda row: row["path"])}
+    return {"path": str(target)}
+
+
 def check_tool_path(tool_name: str, raw_path: str, hermes_home: str | None = None,
                     root: str | None = None) -> Path:
     """Resolve a path-taking tool's argument exactly as its handler will."""
     generated = generated_root(hermes_home, root)
     if tool_name == "foundry_build":
         return output_target(raw_path, generated)
-    return resolve_confined(raw_path, generated)
+    target = resolve_confined(raw_path, generated)
+    if tool_name == "foundry_test":
+        _check_tree_confined(target, generated)
+    elif tool_name == "foundry_catalog":
+        return resolve_confined(target / "CATALOG.md", generated)
+    return target
 
 
 def build(request: str, output_dir: str | None = None, install: bool = False,
@@ -770,6 +871,8 @@ def run_tests(plugin_dir: str | Path, timeout: int = 90,
     if not target.is_dir():
         return {"ok": False, "returncode": None, "stdout": "",
                 "stderr": f"not a directory: {target}"}
+    if not allow_outside_root:
+        _check_tree_confined(target, generated_root(hermes_home, root))
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
@@ -813,9 +916,10 @@ def read_catalog(path: str | Path, hermes_home: str | None = None, root: str | N
                  allow_outside_root: bool = False) -> dict:
     if allow_outside_root:
         plugin_dir = Path(path).expanduser().resolve()
+        catalog = plugin_dir / "CATALOG.md"
     else:
         plugin_dir = resolve_confined(path, generated_root(hermes_home, root))
-    catalog = plugin_dir / "CATALOG.md"
+        catalog = resolve_confined(plugin_dir / "CATALOG.md", generated_root(hermes_home, root))
     if not catalog.exists():
         return {"ok": False, "error": f"no catalog draft at {catalog}"}
     return {"ok": True, "path": str(catalog), "content": catalog.read_text(encoding="utf-8")}

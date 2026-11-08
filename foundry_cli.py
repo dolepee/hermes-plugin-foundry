@@ -52,6 +52,9 @@ def main(argv=None):
         print(f"Tests: {'passed' if result['tests']['ok'] else 'failed'}")
         print(f"Static scan: {'clean' if result['scan']['ok'] else 'findings'}")
         if args.install:
+            if not result["ok"]:
+                print("Refused: build validation failed; nothing was installed", file=sys.stderr)
+                return 1
             print("Installed: " + install_plugin(spec["path"], spec["slug"]))
         return 0 if result["ok"] else 1
     if args.cmd == "test":
