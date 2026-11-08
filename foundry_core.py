@@ -184,7 +184,7 @@ _OUTPUT_VERB = re.compile(
     r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
 )
 _OUTPUT_NOUN = re.compile(
-    r"\b(?:and|with)\s+(?:a|an)?\s*(?:[a-z]+\s+){0,3}"
+    r"\b(?:and|with)\s+(?:a|an)?\s*(?:[a-z.]+(?:\s+[a-z.]+){0,3}\s+)?"
     r"(?:summary|report|digest|output)\b"
 )
 _INPUT_CLAUSE = re.compile(
@@ -215,52 +215,43 @@ def _extension(request: str) -> str:
     # output descriptors like "text summary" out of the standalone scan.
     verb_starts = [match.start() for match in _OUTPUT_VERB.finditer(text)]
     input_starts = [match.start() for match in _INPUT_CLAUSE.finditer(text)]
-    output_noun = _OUTPUT_NOUN.search(text)
-    noun_start = None
-    if output_noun:
-        # A descriptor that qualifies a file noun ("CSV report files",
-        # "CSV summary files") describes the watched files and must stay input.
-        # A standalone one ("and a text report", "a summary of ...") opens the
-        # output clause.
-        tail = text[output_noun.end():]
-        if not re.match(r"\s+files?\b", tail):
-            noun_start = output_noun.start()
+    relation_starts = [match.start() for match in re.finditer(r"\b(?:of|from)\b", text)]
+    noun_starts: list[int] = []
+    for match in _OUTPUT_NOUN.finditer(text):
+        tail = text[match.end():]
+        # "CSV report files" and "CSV summary invoice files" qualify watched
+        # files (plural) and stay input. "text summary file" and
+        # "a .txt report" are standalone output descriptors.
+        if re.match(r"\s+(?:[a-z.]+(?:\s+[a-z.]+){0,2}\s+)?files\b", tail):
+            continue
+        noun_starts.append(match.start())
+
+    markers: list[tuple[int, str]] = []
+    markers.extend((value, "verb") for value in verb_starts)
+    markers.extend((value, "input") for value in input_starts)
+    markers.extend((value, "relation") for value in relation_starts)
+    markers.extend((value, "noun") for value in noun_starts)
 
     def candidate_is_output(start: int, end: int) -> bool:
         """One role decision for a word or dotted-suffix candidate.
 
-        The nearest preceding clause marker defines the candidate's role: an
-        output verb starts a generated-output clause, and an explicit input
-        clause ("then watch", "and monitor") reopens the watched role, so a
-        later request for another input type cannot be read as generated
-        output. An input relation only applies inside its own clause, so a
-        later "write a text report" is not pulled back into a "summary of".
+        The nearest preceding clause marker defines the candidate's role:
+        output verbs and standalone output nouns open generated-output roles;
+        input verbs and of/from open watched-object roles. The nearest marker
+        wins, so a later standalone output noun resets an earlier relation.
         """
-        prior_verbs = [value for value in verb_starts if value <= start]
-        prior_inputs = [value for value in input_starts if value <= start]
-        boundary = max(prior_verbs) if prior_verbs else None
-        if prior_inputs and (boundary is None or max(prior_inputs) > boundary):
+        prior = [item for item in markers if item[0] <= start]
+        if not prior:
             return False
-        if boundary is None:
-            if noun_start is not None and start >= noun_start:
-                boundary = noun_start
-            else:
-                return False
-        rest = text[end:]
-        file_match = re.search(r"\bfiles?\b", rest)
+        boundary, kind = max(prior, key=lambda item: item[0])
+        if kind in {"input", "relation"}:
+            return False
+        if kind == "noun":
+            return True
+        # An output verb is output unless its own clause first introduced an
+        # input object ("generate a summary of CSV files").
         prefix = text[boundary:start]
-        # A qualified object after "summary of"/"from" in this clause is input,
-        # even if a descriptive noun follows it.
-        if re.search(r"\b(?:of|from)\b", prefix):
-            return False
-        if file_match:
-            if prior_verbs:
-                # An explicit output verb makes the generated file output even
-                # without a "summary"/"report" adjective.
-                return True
-            return bool(re.search(r"\b(?:summary|report|digest|output)\b",
-                                  rest[:file_match.start()]))
-        return True
+        return not re.search(r"\b(?:of|from)\b", prefix)
 
     found: list[str] = []
 
