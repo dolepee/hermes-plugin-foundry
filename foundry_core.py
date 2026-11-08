@@ -209,30 +209,32 @@ def _extension(request: str) -> str:
     # output descriptors like "text summary" out of the standalone scan.
     output_verb = _OUTPUT_VERB.search(text)
     output_noun = _OUTPUT_NOUN.search(text)
+    noun_start = None
+    if output_noun and re.search(r"\b(?:summary|digest|output)\b", output_noun.group(0)):
+        noun_start = output_noun.start()
     starts = [match.start() for match in (output_verb, output_noun) if match]
     output_start = min(starts) if starts else len(text)
-    # Only a verb clause marks a later file noun as an output file. A bare
-    # "and CSV report files" is still an input declaration, not an output.
-    file_output_start = output_verb.start() if output_verb else len(text)
+    boundaries = [value for value in (
+        output_verb.start() if output_verb else None, noun_start) if value is not None]
+    file_output_start = min(boundaries) if boundaries else len(text)
 
-    # The generated watcher filters on Path.suffix, so ".txt.gz" would build a
-    # TXT watcher and then ignore every .gz file. Reject composite suffixes.
-    if _COMPOSITE_SUFFIX.search(text):
-        raise ValueError(
-            "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
-        )
-    # Validate every dotted suffix, including digits (".txt2"). The alphabetic
-    # tokenizer must never reinterpret one as a supported extension.
-    for suffix in re.findall(r"\.[a-z][a-z0-9]*", text):
-        if suffix not in set(_TYPE_ALIASES.values()):
-            raise ValueError(
-                f"unsupported file suffix {suffix!r}; name one of .TXT, .CSV, "
-                ".PDF, .MD, .PNG, .JPG, .JPEG or .DOCX"
-            )
+    def candidate_is_output(start: int, end: int) -> bool:
+        """One role decision for a word or dotted-suffix candidate."""
+        if start < file_output_start:
+            return False
+        rest = text[end:]
+        file_match = re.search(r"\bfiles?\b", rest)
+        before_file = rest[:file_match.start()] if file_match else rest
+        prefix = text[file_output_start:start]
+        # A qualified object after "summary of"/"from" is input, even if a
+        # descriptive noun follows it ("summary of CSV invoice files").
+        if re.search(r"\b(?:of|from)\b", prefix):
+            return False
+        if file_match:
+            return bool(re.search(r"\b(?:summary|report|digest|output)\b", before_file))
+        return True
 
     found: list[str] = []
-    for extension in re.findall(rf"(?<![a-z0-9])\.({_DOTTED_TYPES})\b", text):
-        found.append("." + extension)
 
     def add_token(token: str) -> None:
         if token in _TYPE_ALIASES:
@@ -250,46 +252,28 @@ def _extension(request: str) -> str:
                 "Markdown, PNG, JPEG or DOCX"
             )
 
-    # A type word attached to a later file noun is an input declaration even
-    # when it follows an output verb ("... generate a summary of new CSV files").
-    # But an output file format ("a text summary file") is not an input.
-    output_nouns = {"summary", "report", "digest", "output"}
-    input_relations = {"of", "from"}
-
-    def is_type_token(token: str) -> bool:
-        if token in _TYPE_ALIASES or token in _UNSUPPORTED_TYPE_WORDS:
-            return True
-        return token.endswith("s") and token[:-1] in (_TYPE_ALIASES | _UNSUPPORTED_TYPE_WORDS)
-
-    for match in re.finditer(r"\b([a-z]+(?:\s+[a-z]+){0,4})\s+files?\b", text):
-        phrase = match.group(1)
-        words = phrase.split()
-        if match.start() >= file_output_start and words:
-            last = words[-1]
-            output_noun = next(
-                (index for index, word in enumerate(words) if word in output_nouns), None
+    # Dotted candidates are complete suffix tokens, including composite and
+    # digit-bearing forms. The same role decision as word candidates applies
+    # before validation, so an output format is not treated as input.
+    for match in re.finditer(r"\.[a-z][a-z0-9]*(?:\.[a-z0-9]+)*", text):
+        if candidate_is_output(match.start(), match.end()):
+            continue
+        suffix = match.group(0)
+        if _COMPOSITE_SUFFIX.fullmatch(suffix):
+            raise ValueError(
+                "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
             )
-            relation = next(
-                (index for index, word in enumerate(words) if word in input_relations), None
+        if suffix not in set(_TYPE_ALIASES.values()):
+            raise ValueError(
+                f"unsupported file suffix {suffix!r}; name one of .TXT, .CSV, "
+                ".PDF, .MD, .PNG, .JPG, .JPEG or .DOCX"
             )
-            if output_noun is not None:
-                if relation is not None:
-                    object_words = words[relation + 1:]
-                    # "summary of CSV invoice files": collect the qualified
-                    # object, not the output format words before "of".
-                    if any(is_type_token(token) for token in object_words):
-                        for token in object_words:
-                            add_token(token)
-                        continue
-                # A bare "text summary file" or "summary of the files" is output.
-                if not is_type_token(last):
-                    continue
-        for token in words:
-            add_token(token)
-    # Standalone types before an output-purpose clause are input declarations.
-    # After that boundary, only file-noun-attached types count.
-    for token in re.findall(r"[a-z]+", text[:output_start]):
-        add_token(token)
+        found.append(suffix)
+
+    for match in re.finditer(r"(?<![.a-z0-9])[a-z]+(?![.a-z0-9])", text):
+        if candidate_is_output(match.start(), match.end()):
+            continue
+        add_token(match.group(0))
 
     unique = list(dict.fromkeys(found))
     if len(unique) > 1:
