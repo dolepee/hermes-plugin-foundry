@@ -184,14 +184,43 @@ _SUFFIX_ATOM = "\ue000"  # opaque, position-preserving stand-in for a suffix tok
 # punctuation only when what follows is the end of the request or one of these
 # supported instruction clauses. Other prose fails closed instead of being
 # treated as a file declaration.
-_SENTENCE_INSTRUCTION = re.compile(
-    r"\s+(?:please\s+)?(?:"
+_INSTRUCTION_VERBS = (
     r"notify|alert|tell|message|email|send|ping|inform|remind|"
     r"archive|process|move|copy|upload|delete|monitor|watch|"
     r"then|also"
-    r")(?![a-z0-9_-])(?=\s|[.,;:!?]|$)",
+)
+# A follow-up sentence must start with a complete instruction verb; a
+# hyphen/underscore prefix ("Archive-ready", "notify_ready") is a declaration.
+_SENTENCE_INSTRUCTION = re.compile(
+    rf"\s+(?:please\s+)?(?:"
+    rf"(?:{_INSTRUCTION_VERBS})\b(?=\s|[.,;:!?]|$)"
+    rf"|(?:notify|alert|tell|message|email|send|ping|inform|remind)\b"
+    rf"(?=\s+(?:me|us|when|if|on|about|at|once|after|before|with|the|a|an|this|that)\b)"
+    rf"|(?:archive|process|move|copy|upload|delete|monitor|watch)\b"
+    rf"(?=\s+(?:the|this|that|these|those|them|it|all|any|new|old|files?|a|an)\b)"
+    rf")",
     re.IGNORECASE,
 )
+
+
+def _is_instruction_sentence(after: str) -> bool:
+    """Every follow-up sentence, regardless of case, must start with an instruction."""
+    # Split at a period only when the next token starts a sentence in the
+    # supported grammar: a capitalised word or a complete instruction verb.
+    # This keeps abbreviations such as "approx. five minutes" inside the
+    # instruction while still splitting "Notify. archive-ready files".
+    sentences = [
+        part.strip()
+        for part in re.split(
+            rf"(?<=[.!?])\s+(?=(?:[A-Z]|(?:{_INSTRUCTION_VERBS})\b))",
+            after.strip(),
+        )
+        if part.strip()
+    ]
+    return bool(sentences) and all(
+        _SENTENCE_INSTRUCTION.match(" " + sentence) for sentence in sentences
+    )
+
 _OUTPUT_VERB = re.compile(
     r"\b(?:and|to|then|with)\s+(?:also\s+)?"
     r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
@@ -224,10 +253,13 @@ def _extension(request: str) -> str:
 
     Sentence punctuation is intentionally bounded: a period after a suffix is
     removed only at the end of the request or before a supported follow-up
-    instruction (notify, archive, process, send, and similar). Any other prose
-    keeps the period in the suffix and fails closed, so callers should write
-    "watch for CSV files, then notify me" instead of relying on arbitrary
-    sentence parsing.
+    instruction (notify, archive, process, send, and similar). A follow-up
+    boundary is a period followed by a capitalised token or a complete
+    instruction verb; an abbreviation followed by lower-case text stays inside
+    the instruction, so no abbreviation dictionary is maintained. Any other
+    prose keeps the period in the suffix and fails closed, so callers should
+    write "watch for CSV files, then notify me" instead of relying on
+    arbitrary sentence parsing.
     """
     # Keep character positions aligned with the original request so sentence
     # casing is still available when deciding whether a final period is
@@ -316,7 +348,7 @@ def _extension(request: str) -> str:
         # phrase of any length or hyphenation keeps the period in the token.
         if suffix.endswith("."):
             after = original[match.end():]
-            if not after.strip() or _SENTENCE_INSTRUCTION.match(after):
+            if not after.strip() or _is_instruction_sentence(after):
                 suffix = suffix[:-1]
         if _COMPOSITE_SUFFIX.fullmatch(suffix):
             raise ValueError(
