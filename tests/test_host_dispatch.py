@@ -89,7 +89,7 @@ class HostDispatchTests(unittest.TestCase):
                 session_id="host-session",
                 tool_call_id=call_id,
                 user_task="run the Foundry tool",
-                skip_tool_execution_middleware=True,
+                skip_tool_execution_middleware=False,
             )
         return json.loads(raw) if isinstance(raw, str) else raw
 
@@ -142,7 +142,7 @@ class HostDispatchTests(unittest.TestCase):
                 session_id="host-session",
                 tool_call_id=call_id,
                 user_task="run the Foundry tool",
-                skip_tool_execution_middleware=True,
+                skip_tool_execution_middleware=False,
             )
             results[call_id] = json.loads(raw) if isinstance(raw, str) else raw
 

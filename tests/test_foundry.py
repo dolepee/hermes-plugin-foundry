@@ -1,9 +1,6 @@
-import contextvars
 import json
 import os
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -607,7 +604,7 @@ class PluginToolTests(unittest.TestCase):
         self.assertEqual(Path(result["build"]["spec"]["path"]), self.gen / "inside")
 
     def test_register_declares_the_hook(self):
-        tools, hooks = [], []
+        tools, hooks, middleware = [], [], []
 
         class Ctx:
             def register_tool(self, **kwargs):
@@ -616,12 +613,16 @@ class PluginToolTests(unittest.TestCase):
             def register_hook(self, name, callback):
                 hooks.append((name, callback))
 
+            def register_middleware(self, kind, callback):
+                middleware.append((kind, callback))
+
         plugin.register(Ctx())
         self.assertEqual(sorted(tools), sorted(self.tools))
         self.assertEqual(hooks[0][0], "pre_tool_call")
         self.assertEqual(hooks[1][0], "post_approval_response")
         self.assertTrue(callable(hooks[0][1]))
         self.assertTrue(callable(hooks[1][1]))
+        self.assertEqual(middleware, [("tool_execution", plugin._tool_execution_middleware)])
 
 
     def test_handler_uses_host_context_call_id_when_dispatch_omits_it(self):
@@ -635,19 +636,16 @@ class PluginToolTests(unittest.TestCase):
             plugin._on_post_approval_response(
                 pattern_key="plugin_rule:" + request["rule_key"], choice="once",
                 session_id="host-context", tool_call_id=call_id)
-        fake_context = types.SimpleNamespace(
-            _approval_tool_call_id=contextvars.ContextVar("test_approval_tool_call_id", default=""))
-        with unittest.mock.patch.dict(sys.modules, {"tools.approval_context": fake_context}):
-            with unittest.mock.patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
-                for call_id in ("call-A", "call-B"):
-                    token = fake_context._approval_tool_call_id.set(call_id)
-                    try:
-                        result = json.loads(plugin._handler("foundry_test")(
-                            {"path": path}, session_id="host-context"))
-                    finally:
-                        fake_context._approval_tool_call_id.reset(token)
-                    self.assertTrue(result["ok"], result)
-                self.assertEqual(run.call_count, 2)
+        with unittest.mock.patch.object(plugin.core, "run_tests", return_value={"ok": True}) as run:
+            for call_id in ("call-A", "call-B"):
+                token = plugin._TOOL_CALL_ID.set(call_id)
+                try:
+                    result = json.loads(plugin._handler("foundry_test")(
+                        {"path": path}, session_id="host-context"))
+                finally:
+                    plugin._TOOL_CALL_ID.reset(token)
+                self.assertTrue(result["ok"], result)
+            self.assertEqual(run.call_count, 2)
         self.assertEqual(plugin._once_grants, {})
 
     def test_handler_without_a_call_id_stays_fail_closed_when_two_grants_match(self):
