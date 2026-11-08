@@ -262,6 +262,36 @@ class ConfinementTests(FoundryTests):
         self.assertFalse(result["ok"])
         self.assertTrue(result["needs_approval"])
 
+    def test_source_change_while_approval_is_pending_is_not_authorised(self):
+        out = self.gen / "pending-catalog"
+        foundry_core.build("Watch /tmp/invoices for new PDF files", output_dir=str(out))
+        outside = Path(self._tmp.name) / "pending-catalog.md"
+        outside.write_text("# approved\n")
+        (out / "CATALOG.md").unlink()
+        (out / "CATALOG.md").symlink_to(outside)
+        for choice in ("once", "session", "always"):
+            with self.subTest(choice=choice):
+                outside.write_text("# approved\n")
+                request = plugin._on_pre_tool_call(
+                    tool_name="foundry_catalog", args={"path": str(out)},
+                    session_id=f"pending-{choice}", tool_call_id=f"call-{choice}")
+                self.assertEqual(request["action"], "approve")
+                # The target changes after the prompt went up but before the
+                # human answered: the decision names the old bytes only.
+                outside.write_text("# replacement\n")
+                plugin._on_post_approval_response(
+                    pattern_key="plugin_rule:" + request["rule_key"], choice=choice,
+                    session_id=f"pending-{choice}", tool_call_id=f"call-{choice}")
+                result = json.loads(plugin._handler("foundry_catalog")(
+                    {"path": str(out)}, session_id=f"pending-{choice}",
+                    tool_call_id=f"call-{choice}"))
+                self.assertFalse(result["ok"], result)
+                self.assertTrue(result["needs_approval"], result)
+                again = plugin._on_pre_tool_call(
+                    tool_name="foundry_catalog", args={"path": str(out)},
+                    session_id=f"pending-{choice}", tool_call_id=f"call-{choice}-2")
+                self.assertEqual(again["action"], "approve")
+
     def test_call_b_cannot_consume_call_a_once_grant(self):
         path = str(self._tmp.name)
         request_a = plugin._on_pre_tool_call(

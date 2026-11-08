@@ -264,7 +264,11 @@ def _on_post_approval_response(*, pattern_key: str = "", choice: str = "",
     if choice not in {"once", "session", "always"}:
         return
     identity = _approval_key(tool_name, raw_path)
-    if identity is None:
+    if identity is None or identity[1] != key[1]:
+        # The decision covers the identity that was on screen when the prompt
+        # went up. If the target's bytes or resolution changed while the
+        # request was pending, the approval authorises different code: drop it
+        # and let the next call ask again.
         return
     now = time.monotonic()
     with _approvals_lock:
