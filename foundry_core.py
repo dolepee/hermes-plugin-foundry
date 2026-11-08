@@ -184,7 +184,9 @@ _OUTPUT_VERB = re.compile(
     r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
 )
 _OUTPUT_NOUN = re.compile(
-    r"\b(?:and|with)\s+(?:a|an)?\s*(?:[a-z.]+(?:\s+[a-z.]+){0,3}\s+)?"
+    r"\b(?:and|with)\s+(?:a|an)?\s*"
+    r"(?:(?!(?:files?|and|or|then)\b)[a-z.]+"
+    r"(?:\s+(?!(?:files?|and|or|then)\b)[a-z.]+){0,3}\s+)?"
     r"(?:summary|report|digest|output)\b"
 )
 _INPUT_CLAUSE = re.compile(
@@ -221,8 +223,11 @@ def _extension(request: str) -> str:
         tail = text[match.end():]
         # "CSV report files" and "CSV summary invoice files" qualify watched
         # files (plural) and stay input. "text summary file" and
-        # "a .txt report" are standalone output descriptors.
-        if re.match(r"\s+(?:[a-z.]+(?:\s+[a-z.]+){0,2}\s+)?files\b", tail):
+        # "a .txt report" are standalone output descriptors. Do not let the
+        # qualifier guard cross an of/from relation or a clause conjunction:
+        # "summary of the files" is output, not a watched-file descriptor.
+        qualifier = re.match(r"\s+(?:[a-z.]+(?:\s+[a-z.]+){0,2}\s+)?files\b", tail)
+        if qualifier and not re.search(r"\b(?:of|from|and|or|then)\b", qualifier.group(0)):
             continue
         noun_starts.append(match.start())
 
