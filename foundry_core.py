@@ -180,6 +180,18 @@ _UNSUPPORTED_TYPE_WORDS = {
 }
 _COMPOSITE_SUFFIX = re.compile(r"\.[a-z0-9]+(?:\.[a-z0-9]+)+")
 _SUFFIX_ATOM = "\ue000"  # opaque, position-preserving stand-in for a suffix token
+# Bounded, intentional sentence archetypes. A period after a suffix is
+# punctuation only when what follows is the end of the request or one of these
+# supported instruction clauses. Other prose fails closed instead of being
+# treated as a file declaration.
+_SENTENCE_INSTRUCTION = re.compile(
+    r"\s+(?:please\s+)?(?:"
+    r"notify|alert|tell|message|email|send|ping|inform|remind|"
+    r"archive|process|move|copy|upload|delete|monitor|watch|"
+    r"then|also"
+    r")\b",
+    re.IGNORECASE,
+)
 _OUTPUT_VERB = re.compile(
     r"\b(?:and|to|then|with)\s+(?:also\s+)?"
     r"(?:produce|create|generate|write|output|make|summari[sz]e|return)\b"
@@ -209,6 +221,13 @@ def _extension(request: str) -> str:
     ("then watch ...") reopens the watched role. Only explicit known type
     words or single dotted suffixes are accepted; missing, unsupported,
     composite or conflicting types are errors.
+
+    Sentence punctuation is intentionally bounded: a period after a suffix is
+    removed only at the end of the request or before a supported follow-up
+    instruction (notify, archive, process, send, and similar). Any other prose
+    keeps the period in the suffix and fails closed, so callers should write
+    "watch for CSV files, then notify me" instead of relying on arbitrary
+    sentence parsing.
     """
     # Keep character positions aligned with the original request so sentence
     # casing is still available when deciding whether a final period is
@@ -292,20 +311,12 @@ def _extension(request: str) -> str:
         if candidate_is_output(match.start(), match.end()):
             continue
         suffix = match.group(0)
-        # A final period is punctuation only at an actual sentence boundary.
-        # First rule out a continuing file declaration in any casing
-        # (".csv. FILES", ".csv. Invoice files"), then look for positive
-        # sentence evidence (end of request or a capitalised next sentence).
+        # A final period is punctuation only at the end of the request or
+        # before one of the supported instruction clauses. A continuing noun
+        # phrase of any length or hyphenation keeps the period in the token.
         if suffix.endswith("."):
             after = original[match.end():]
-            continuing_file = re.match(
-                r"\s+(?:(?:[A-Za-z.]+)\s+){0,2}files?\b",
-                after,
-                re.IGNORECASE,
-            )
-            if not continuing_file and (
-                not after.strip() or re.match(r"\s+[A-Z]", after)
-            ):
+            if not after.strip() or _SENTENCE_INSTRUCTION.match(after):
                 suffix = suffix[:-1]
         if _COMPOSITE_SUFFIX.fullmatch(suffix):
             raise ValueError(
