@@ -1,5 +1,10 @@
 # Plugin Foundry
 
+Canonical source: [dolepee/hermes-plugin-foundry](https://github.com/dolepee/hermes-plugin-foundry).
+The repository was transferred with its history and original authorship intact.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for tests and the exact-head Codex review
+requirement, and [SECURITY.md](SECURITY.md) for execution limits.
+
 Describe a narrow plugin. Foundry emits a native Hermes plugin and runs its
 tests. Installing the result is a separate, human step.
 
@@ -26,7 +31,7 @@ environment are not passed through.
 
 ## CLI
 
-For local runs, review and the demo:
+For local runs and code review:
 
 ```bash
 python3 foundry_cli.py plan "Watch ~/Invoices for new PDF files"

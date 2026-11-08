@@ -13,7 +13,7 @@ class FoundryTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "foundry"
+        self.root = Path(self._tmp.name).resolve() / "foundry"
         self.gen = self.root / "generated"
         self._env = patch.dict(os.environ, {"HERMES_PLUGIN_FOUNDRY_ROOT": str(self.root)})
         self._env.start()
@@ -129,7 +129,7 @@ class PluginToolTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "foundry"
+        self.root = Path(self._tmp.name).resolve() / "foundry"
         self.gen = self.root / "generated"
         self._env = patch.dict(os.environ, {"HERMES_PLUGIN_FOUNDRY_ROOT": str(self.root)})
         self._env.start()
