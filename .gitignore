@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+generated/
+demo-*/
+out/
+data/
+
+.hermes/
+foundry-demo/
+
+CATALOG.yaml
+plugin-catalog-entry.yaml
+
+demo/frames/
+demo/*.mp4
+demo/preview-*.png
+
+# Private recording and submission preparation live outside the repository.
+DEMO.md
+DEMO_SCRIPT.md
+demo-script.*
+*-demo-script.*
+recording-script.*
+submission-checklist.*
+SUBMISSION_CHECKLIST.md
+docs/*SUBMISSION*.md
