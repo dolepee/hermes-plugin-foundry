@@ -115,26 +115,48 @@ class HostDispatchTests(unittest.TestCase):
         return root, out
 
     def test_two_overlapping_identical_once_grants_are_both_consumable(self):
-        """The host, not this test, supplies each call id to the plugin hook."""
+        """The host, not this test, supplies each call id to the plugin hook.
+
+        One prompt mock and one recording list span both workers. The barrier
+        makes the overlap a precondition: neither decision returns until both
+        approvals are pending, rather than relying on thread scheduling.
+        """
         path, out = self.outside_test_dir("same")
         approved_identity = self.plugin.core.approval_identity("foundry_test", str(path))
         results = {}
+        prompt_calls = []
+        prompt_lock = threading.Lock()
+        both_pending = threading.Barrier(2)
+
+        def shared_prompt(*_args, **_kwargs):
+            with prompt_lock:
+                prompt_calls.append(self.approval_context._approval_tool_call_id.get())
+            both_pending.wait(timeout=15)
+            return "once"
 
         def invoke(call_id):
-            results[call_id] = self.call(
-                "foundry_test", {"path": str(path)}, call_id
+            raw = __import__("model_tools").handle_function_call(
+                "foundry_test",
+                {"path": str(path)},
+                task_id="host-session",
+                session_id="host-session",
+                tool_call_id=call_id,
+                user_task="run the Foundry tool",
+                skip_tool_execution_middleware=True,
             )
+            results[call_id] = json.loads(raw) if isinstance(raw, str) else raw
 
         threads = [
             threading.Thread(target=invoke, args=(call_id,))
             for call_id in ("call-A", "call-B")
         ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=30)
+        with patch("tools.approval.prompt_dangerous_approval", side_effect=shared_prompt):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
 
-        self.assertEqual(sorted(self.prompt_calls), ["call-A", "call-B"])
+        self.assertEqual(sorted(prompt_calls), ["call-A", "call-B"])
         self.assertTrue(results["call-A"].get("ok"), results["call-A"])
         self.assertTrue(results["call-B"].get("ok"), results["call-B"])
         self.assertTrue((out / "ran.txt").exists())
