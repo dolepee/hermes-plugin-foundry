@@ -1,0 +1,38 @@
+name: Plugin Foundry checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    name: Unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: ubuntu-latest
+            python: '3.13'
+          - os: macos-latest
+            python: '3.13'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit and generated-plugin tests
+        run: python -m unittest discover -s tests -v
+      - name: Compile source
+        run: python -m compileall -q foundry_core.py foundry_cli.py plugin.py tests
+  admission:
+    name: Hermes admission
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: NousResearch/hermes-agent/.github/actions/plugin-validate@2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19
+        with:
+          path: .
+          hermes-ref: 2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19
