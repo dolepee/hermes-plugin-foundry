@@ -210,11 +210,18 @@ def _extension(request: str) -> str:
     words or single dotted suffixes are accepted; missing, unsupported,
     composite or conflicting types are errors.
     """
-    lower = request.lower()
-    # Paths often contain type-like words; remove path-shaped tokens before
-    # interpreting the natural-language request.
-    text = re.sub(r"(?:^|\s)(?:~|\.{0,2}/)\S+", " ", lower)
-    text = re.sub(r"https?://\S+", " ", text)
+    # Keep character positions aligned with the original request so sentence
+    # casing is still available when deciding whether a final period is
+    # punctuation. Path-shaped tokens are blanked, not shortened.
+    original = re.sub(
+        r"(?:^|\s)(?:~|\.{0,2}/)\S+",
+        lambda match: " " * len(match.group(0)),
+        request,
+    )
+    original = re.sub(
+        r"https?://\S+", lambda match: " " * len(match.group(0)), original
+    )
+    text = original.lower()
     # Tokenize complete dotted suffixes before any word or clause scan. Their
     # interiors are masked so a hyphen/underscore segment or an "of/from"
     # inside a filename can never create a spurious marker.
@@ -285,10 +292,13 @@ def _extension(request: str) -> str:
         if candidate_is_output(match.start(), match.end()):
             continue
         suffix = match.group(0)
-        # Only a sentence-final full stop is punctuation. A period before a
-        # file noun is part of the requested suffix token.
-        if suffix.endswith(".") and not text[match.end():].strip():
-            suffix = suffix[:-1]
+        # A final period is punctuation only at an actual sentence boundary:
+        # end of request, or whitespace followed by a capitalised next
+        # sentence. A period before a lower-case file noun stays in the token.
+        if suffix.endswith("."):
+            after = original[match.end():]
+            if not after.strip() or re.match(r"\s+[A-Z]", after):
+                suffix = suffix[:-1]
         if _COMPOSITE_SUFFIX.fullmatch(suffix):
             raise ValueError(
                 "unsupported composite file suffix; name one suffix such as .TXT or .CSV"
